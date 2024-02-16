@@ -22,12 +22,14 @@ limitations under the License.
 package windows
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
@@ -38,13 +40,13 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("[Feature:Windows] GMSA Kubelet [Slow]", func() {
+var _ = sigDescribe(feature.Windows, "GMSA Kubelet", framework.WithSlow(), skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("gmsa-kubelet-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("kubelet GMSA support", func() {
 		ginkgo.Context("when creating a pod with correct GMSA credential specs", func() {
-			ginkgo.It("passes the credential specs down to the Pod's containers", func() {
+			ginkgo.It("passes the credential specs down to the Pod's containers", func(ctx context.Context) {
 				defer ginkgo.GinkgoRecover()
 
 				podName := "with-correct-gmsa-specs"
@@ -94,7 +96,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Kubelet [Slow]", func() {
 				}
 
 				ginkgo.By("creating a pod with correct GMSA specs")
-				e2epod.NewPodClient(f).CreateSync(pod)
+				e2epod.NewPodClient(f).CreateSync(ctx, pod)
 
 				ginkgo.By("checking the domain reported by nltest in the containers")
 				namespaceOption := fmt.Sprintf("--namespace=%s", f.Namespace.Name)
@@ -111,7 +113,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Kubelet [Slow]", func() {
 					// even for bogus creds, `nltest /PARENTDOMAIN` simply returns the AD domain, which is enough for our purpose here.
 					// note that the "eventually" part seems to be needed to account for the fact that powershell containers
 					// are a bit slow to become responsive, even when docker reports them as running.
-					gomega.Eventually(func() bool {
+					gomega.Eventually(ctx, func() bool {
 						output, err = e2ekubectl.RunKubectl(f.Namespace.Name, "exec", namespaceOption, podName, containerOption, "--", "nltest", "/PARENTDOMAIN")
 						return err == nil
 					}, 1*time.Minute, 1*time.Second).Should(gomega.BeTrue())
@@ -132,7 +134,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Kubelet [Slow]", func() {
 			})
 		})
 	})
-})
+}))
 
 func generateDummyCredSpecs(domain string) *string {
 	shortName := strings.ToUpper(strings.Split(domain, ".")[0])

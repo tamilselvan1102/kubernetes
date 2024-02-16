@@ -168,6 +168,21 @@ func (mr *MockRuntimeMockRecorder) GarbageCollect(ctx, gcPolicy, allSourcesReady
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GarbageCollect", reflect.TypeOf((*MockRuntime)(nil).GarbageCollect), ctx, gcPolicy, allSourcesReady, evictNonDeletedPods)
 }
 
+// GeneratePodStatus mocks base method.
+func (m *MockRuntime) GeneratePodStatus(event *v10.ContainerEventResponse) (*container.PodStatus, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GeneratePodStatus", event)
+	ret0, _ := ret[0].(*container.PodStatus)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GeneratePodStatus indicates an expected call of GeneratePodStatus.
+func (mr *MockRuntimeMockRecorder) GeneratePodStatus(event interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GeneratePodStatus", reflect.TypeOf((*MockRuntime)(nil).GeneratePodStatus), event)
+}
+
 // GetContainerLogs mocks base method.
 func (m *MockRuntime) GetContainerLogs(ctx context.Context, pod *v1.Pod, containerID container.ContainerID, logOptions *v1.PodLogOptions, stdout, stderr io.Writer) error {
 	m.ctrl.T.Helper()
@@ -195,6 +210,21 @@ func (m *MockRuntime) GetImageRef(ctx context.Context, image container.ImageSpec
 func (mr *MockRuntimeMockRecorder) GetImageRef(ctx, image interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetImageRef", reflect.TypeOf((*MockRuntime)(nil).GetImageRef), ctx, image)
+}
+
+// GetImageSize mocks base method.
+func (m *MockRuntime) GetImageSize(ctx context.Context, image container.ImageSpec) (uint64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetImageSize", ctx, image)
+	ret0, _ := ret[0].(uint64)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetImageSize indicates an expected call of GetImageSize.
+func (mr *MockRuntimeMockRecorder) GetImageSize(ctx, image interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetImageSize", reflect.TypeOf((*MockRuntime)(nil).GetImageSize), ctx, image)
 }
 
 // GetPodStatus mocks base method.
@@ -225,6 +255,21 @@ func (m *MockRuntime) GetPods(ctx context.Context, all bool) ([]*container.Pod, 
 func (mr *MockRuntimeMockRecorder) GetPods(ctx, all interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPods", reflect.TypeOf((*MockRuntime)(nil).GetPods), ctx, all)
+}
+
+// ImageFsInfo mocks base method.
+func (m *MockRuntime) ImageFsInfo(ctx context.Context) (*v10.ImageFsInfoResponse, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ImageFsInfo", ctx)
+	ret0, _ := ret[0].(*v10.ImageFsInfoResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ImageFsInfo indicates an expected call of ImageFsInfo.
+func (mr *MockRuntimeMockRecorder) ImageFsInfo(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ImageFsInfo", reflect.TypeOf((*MockRuntime)(nil).ImageFsInfo), ctx)
 }
 
 // ImageStats mocks base method.
@@ -269,6 +314,36 @@ func (m *MockRuntime) ListImages(ctx context.Context) ([]container.Image, error)
 func (mr *MockRuntimeMockRecorder) ListImages(ctx interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListImages", reflect.TypeOf((*MockRuntime)(nil).ListImages), ctx)
+}
+
+// ListMetricDescriptors mocks base method.
+func (m *MockRuntime) ListMetricDescriptors(ctx context.Context) ([]*v10.MetricDescriptor, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListMetricDescriptors", ctx)
+	ret0, _ := ret[0].([]*v10.MetricDescriptor)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListMetricDescriptors indicates an expected call of ListMetricDescriptors.
+func (mr *MockRuntimeMockRecorder) ListMetricDescriptors(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListMetricDescriptors", reflect.TypeOf((*MockRuntime)(nil).ListMetricDescriptors), ctx)
+}
+
+// ListPodSandboxMetrics mocks base method.
+func (m *MockRuntime) ListPodSandboxMetrics(ctx context.Context) ([]*v10.PodSandboxMetrics, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListPodSandboxMetrics", ctx)
+	ret0, _ := ret[0].([]*v10.PodSandboxMetrics)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListPodSandboxMetrics indicates an expected call of ListPodSandboxMetrics.
+func (mr *MockRuntimeMockRecorder) ListPodSandboxMetrics(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPodSandboxMetrics", reflect.TypeOf((*MockRuntime)(nil).ListPodSandboxMetrics), ctx)
 }
 
 // PullImage mocks base method.
@@ -476,6 +551,36 @@ func (m *MockImageService) GetImageRef(ctx context.Context, image container.Imag
 func (mr *MockImageServiceMockRecorder) GetImageRef(ctx, image interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetImageRef", reflect.TypeOf((*MockImageService)(nil).GetImageRef), ctx, image)
+}
+
+// GetImageSize mocks base method.
+func (m *MockImageService) GetImageSize(ctx context.Context, image container.ImageSpec) (uint64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetImageSize", ctx, image)
+	ret0, _ := ret[0].(uint64)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetImageSize indicates an expected call of GetImageSize.
+func (mr *MockImageServiceMockRecorder) GetImageSize(ctx, image interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetImageSize", reflect.TypeOf((*MockImageService)(nil).GetImageSize), ctx, image)
+}
+
+// ImageFsInfo mocks base method.
+func (m *MockImageService) ImageFsInfo(ctx context.Context) (*v10.ImageFsInfoResponse, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ImageFsInfo", ctx)
+	ret0, _ := ret[0].(*v10.ImageFsInfoResponse)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ImageFsInfo indicates an expected call of ImageFsInfo.
+func (mr *MockImageServiceMockRecorder) ImageFsInfo(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ImageFsInfo", reflect.TypeOf((*MockImageService)(nil).ImageFsInfo), ctx)
 }
 
 // ImageStats mocks base method.

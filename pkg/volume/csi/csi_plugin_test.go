@@ -28,10 +28,14 @@ import (
 	storage "k8s.io/api/storage/v1"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilversion "k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
 	utiltesting "k8s.io/client-go/util/testing"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 )
@@ -139,7 +143,7 @@ func newTestPluginWithVolumeHost(t *testing.T, client *fakeclient.Clientset, hos
 }
 
 func registerFakePlugin(pluginName, endpoint string, versions []string, t *testing.T) {
-	highestSupportedVersions, err := highestSupportedVersion(versions)
+	highestSupportedVersions, err := utilversion.HighestSupportedVersion(versions)
 	if err != nil {
 		t.Fatalf("unexpected error parsing versions (%v) for pluginName %q endpoint %q: %#v", versions, pluginName, endpoint, err)
 	}
@@ -316,16 +320,20 @@ func TestPluginConstructVolumeSpec(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	testCases := []struct {
-		name       string
-		originSpec *volume.Spec
-		specVolID  string
-		volHandle  string
-		podUID     types.UID
+		name                      string
+		seLinuxMountEnabled       bool
+		originSpec                *volume.Spec
+		originSELinuxMountContext string
+		specVolID                 string
+		volHandle                 string
+		expectedSELinuxContext    string
+		podUID                    types.UID
 	}{
 		{
-			name:       "construct spec1 from original persistent spec",
-			specVolID:  "test.vol.id",
-			volHandle:  "testvol-handle1",
+			name:      "construct spec1 from original persistent spec",
+			specVolID: "test.vol.id",
+			volHandle: "testvol-handle1",
+
 			originSpec: volume.NewSpecFromPersistentVolume(makeTestPV("test.vol.id", 20, testDriver, "testvol-handle1"), true),
 			podUID:     types.UID(fmt.Sprintf("%08X", rand.Uint64())),
 		},
@@ -336,12 +344,34 @@ func TestPluginConstructVolumeSpec(t *testing.T) {
 			originSpec: volume.NewSpecFromPersistentVolume(makeTestPV("spec2", 20, testDriver, "handle2"), true),
 			podUID:     types.UID(fmt.Sprintf("%08X", rand.Uint64())),
 		},
+		{
+			name:                      "construct SELinux context from original persistent spec when the feature is enabled",
+			seLinuxMountEnabled:       true,
+			specVolID:                 "spec3",
+			volHandle:                 "handle3",
+			originSELinuxMountContext: "system_u:object_r:container_file_t:s0:c314,c894",
+			originSpec:                volume.NewSpecFromPersistentVolume(makeTestPV("spec3", 20, testDriver, "handle3"), true),
+			expectedSELinuxContext:    "system_u:object_r:container_file_t:s0:c314,c894",
+			podUID:                    types.UID(fmt.Sprintf("%08X", rand.Uint64())),
+		},
+		{
+			name:                      "construct empty SELinux from original persistent spec when the feature is disabled",
+			seLinuxMountEnabled:       false,
+			specVolID:                 "spec4",
+			volHandle:                 "handle4",
+			originSELinuxMountContext: "system_u:object_r:container_file_t:s0:c314,c894",
+			originSpec:                volume.NewSpecFromPersistentVolume(makeTestPV("spec4", 20, testDriver, "handle4"), true),
+			expectedSELinuxContext:    "", // The context is cleared when the feature gate is off
+			podUID:                    types.UID(fmt.Sprintf("%08X", rand.Uint64())),
+		},
 	}
 
 	registerFakePlugin(testDriver, "endpoint", []string{"1.0.0"}, t)
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SELinuxMountReadWriteOncePod, tc.seLinuxMountEnabled)()
+
 			mounter, err := plug.NewMounter(
 				tc.originSpec,
 				&api.Pod{ObjectMeta: meta.ObjectMeta{UID: tc.podUID, Namespace: testns}},
@@ -356,44 +386,48 @@ func TestPluginConstructVolumeSpec(t *testing.T) {
 			csiMounter := mounter.(*csiMountMgr)
 
 			mountPath := filepath.Dir(csiMounter.GetPath())
-			err = prepareVolumeInfoFile(mountPath, plug, tc.originSpec.Name(), csiMounter.volumeID, testDriver, string(csiMounter.volumeLifecycleMode))
+			err = prepareVolumeInfoFile(mountPath, plug, tc.originSpec.Name(), csiMounter.volumeID, testDriver, string(csiMounter.volumeLifecycleMode), tc.originSELinuxMountContext)
 			if err != nil {
 				t.Fatalf("failed to save fake volume info file: %s", err)
 			}
 
 			// rebuild spec
-			spec, err := plug.ConstructVolumeSpec("test-pv", filepath.Dir(csiMounter.GetPath()))
+			rec, err := plug.ConstructVolumeSpec("test-pv", filepath.Dir(csiMounter.GetPath()))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if spec == nil {
+			if rec.Spec == nil {
 				t.Fatal("nil volume.Spec constructed")
 			}
 
 			// inspect spec
-			if spec.PersistentVolume == nil || spec.PersistentVolume.Spec.CSI == nil {
+			if rec.Spec.PersistentVolume == nil || rec.Spec.PersistentVolume.Spec.CSI == nil {
 				t.Fatal("CSIPersistentVolume not found in constructed spec ")
 			}
 
-			volHandle := spec.PersistentVolume.Spec.CSI.VolumeHandle
+			volHandle := rec.Spec.PersistentVolume.Spec.CSI.VolumeHandle
 			if volHandle != tc.originSpec.PersistentVolume.Spec.CSI.VolumeHandle {
 				t.Error("unexpected volumeHandle constructed:", volHandle)
 			}
-			driverName := spec.PersistentVolume.Spec.CSI.Driver
+			driverName := rec.Spec.PersistentVolume.Spec.CSI.Driver
 			if driverName != tc.originSpec.PersistentVolume.Spec.CSI.Driver {
 				t.Error("unexpected driverName constructed:", driverName)
 			}
 
-			if spec.PersistentVolume.Spec.VolumeMode == nil {
+			if rec.Spec.PersistentVolume.Spec.VolumeMode == nil {
 				t.Fatalf("Volume mode has not been set.")
 			}
 
-			if *spec.PersistentVolume.Spec.VolumeMode != api.PersistentVolumeFilesystem {
-				t.Errorf("Unexpected volume mode %q", *spec.PersistentVolume.Spec.VolumeMode)
+			if *rec.Spec.PersistentVolume.Spec.VolumeMode != api.PersistentVolumeFilesystem {
+				t.Errorf("Unexpected volume mode %q", *rec.Spec.PersistentVolume.Spec.VolumeMode)
 			}
 
-			if spec.Name() != tc.specVolID {
-				t.Errorf("Unexpected spec name constructed %s", spec.Name())
+			if rec.Spec.Name() != tc.specVolID {
+				t.Errorf("Unexpected spec name constructed %s", rec.Spec.Name())
+			}
+
+			if rec.SELinuxMountContext != tc.expectedSELinuxContext {
+				t.Errorf("Expected SELinux context %q, got %q", tc.expectedSELinuxContext, rec.SELinuxMountContext)
 			}
 		})
 	}
@@ -490,50 +524,50 @@ func TestPluginConstructVolumeSpecWithInline(t *testing.T) {
 			csiMounter := mounter.(*csiMountMgr)
 
 			mountPath := filepath.Dir(csiMounter.GetPath())
-			err = prepareVolumeInfoFile(mountPath, plug, tc.originSpec.Name(), csiMounter.volumeID, testDriver, string(csiMounter.volumeLifecycleMode))
+			err = prepareVolumeInfoFile(mountPath, plug, tc.originSpec.Name(), csiMounter.volumeID, testDriver, string(csiMounter.volumeLifecycleMode), "")
 			if err != nil {
 				t.Fatalf("failed to save fake volume info file: %s", err)
 			}
 
 			// rebuild spec
-			spec, err := plug.ConstructVolumeSpec("test-pv", filepath.Dir(csiMounter.GetPath()))
+			rec, err := plug.ConstructVolumeSpec("test-pv", filepath.Dir(csiMounter.GetPath()))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if spec == nil {
+			if rec.Spec == nil {
 				t.Fatal("nil volume.Spec constructed")
 			}
 
-			if spec.Name() != tc.specVolID {
-				t.Errorf("unexpected spec name constructed volume.Spec: %s", spec.Name())
+			if rec.Spec.Name() != tc.specVolID {
+				t.Errorf("unexpected spec name constructed volume.Spec: %s", rec.Spec.Name())
 			}
 
 			switch {
-			case spec.Volume != nil:
-				if spec.Volume.CSI == nil {
+			case rec.Spec.Volume != nil:
+				if rec.Spec.Volume.CSI == nil {
 					t.Error("missing CSIVolumeSource in constructed volume.Spec")
 				}
-				if spec.Volume.CSI.Driver != tc.originSpec.Volume.CSI.Driver {
-					t.Error("unexpected driver in constructed volume source:", spec.Volume.CSI.Driver)
+				if rec.Spec.Volume.CSI.Driver != tc.originSpec.Volume.CSI.Driver {
+					t.Error("unexpected driver in constructed volume source:", rec.Spec.Volume.CSI.Driver)
 				}
 
-			case spec.PersistentVolume != nil:
-				if spec.PersistentVolume.Spec.CSI == nil {
+			case rec.Spec.PersistentVolume != nil:
+				if rec.Spec.PersistentVolume.Spec.CSI == nil {
 					t.Fatal("missing CSIPersistentVolumeSource in constructed volume.spec")
 				}
-				volHandle := spec.PersistentVolume.Spec.CSI.VolumeHandle
+				volHandle := rec.Spec.PersistentVolume.Spec.CSI.VolumeHandle
 				if volHandle != tc.originSpec.PersistentVolume.Spec.CSI.VolumeHandle {
 					t.Error("unexpected volumeHandle constructed in persistent volume source:", volHandle)
 				}
-				driverName := spec.PersistentVolume.Spec.CSI.Driver
+				driverName := rec.Spec.PersistentVolume.Spec.CSI.Driver
 				if driverName != tc.originSpec.PersistentVolume.Spec.CSI.Driver {
 					t.Error("unexpected driverName constructed in persistent volume source:", driverName)
 				}
-				if spec.PersistentVolume.Spec.VolumeMode == nil {
+				if rec.Spec.PersistentVolume.Spec.VolumeMode == nil {
 					t.Fatalf("Volume mode has not been set.")
 				}
-				if *spec.PersistentVolume.Spec.VolumeMode != api.PersistentVolumeFilesystem {
-					t.Errorf("Unexpected volume mode %q", *spec.PersistentVolume.Spec.VolumeMode)
+				if *rec.Spec.PersistentVolume.Spec.VolumeMode != api.PersistentVolumeFilesystem {
+					t.Errorf("Unexpected volume mode %q", *rec.Spec.PersistentVolume.Spec.VolumeMode)
 				}
 			default:
 				t.Fatal("invalid volume.Spec constructed")
@@ -1377,7 +1411,7 @@ func TestValidatePluginExistingDriver(t *testing.T) {
 
 	for _, tc := range testCases {
 		// Arrange & Act
-		highestSupportedVersions1, err := highestSupportedVersion(tc.versions1)
+		highestSupportedVersions1, err := utilversion.HighestSupportedVersion(tc.versions1)
 		if err != nil {
 			t.Fatalf("unexpected error parsing version for testcase: %#v: %v", tc, err)
 		}
@@ -1397,112 +1431,6 @@ func TestValidatePluginExistingDriver(t *testing.T) {
 		}
 		if !tc.shouldFail && err != nil {
 			t.Fatalf("unexpected error during ValidatePlugin for testcase: %#v\r\n err:%v", tc, err)
-		}
-	}
-}
-
-func TestHighestSupportedVersion(t *testing.T) {
-	testCases := []struct {
-		versions                        []string
-		expectedHighestSupportedVersion string
-		shouldFail                      bool
-	}{
-		{
-			versions:                        []string{"v1.0.0"},
-			expectedHighestSupportedVersion: "1.0.0",
-			shouldFail:                      false,
-		},
-		{
-			versions:   []string{"0.3.0"},
-			shouldFail: true,
-		},
-		{
-			versions:   []string{"0.2.0"},
-			shouldFail: true,
-		},
-		{
-			versions:                        []string{"1.0.0"},
-			expectedHighestSupportedVersion: "1.0.0",
-			shouldFail:                      false,
-		},
-		{
-			versions:   []string{"v0.3.0"},
-			shouldFail: true,
-		},
-		{
-			versions:   []string{"0.2.0"},
-			shouldFail: true,
-		},
-		{
-			versions:   []string{"0.2.0", "v0.3.0"},
-			shouldFail: true,
-		},
-		{
-			versions:                        []string{"0.2.0", "v1.0.0"},
-			expectedHighestSupportedVersion: "1.0.0",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"0.2.0", "v1.2.3"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"v1.2.3", "v0.3.0"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"v1.2.3", "v0.3.0", "2.0.1"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"v1.2.3", "4.9.12", "v0.3.0", "2.0.1"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{"4.9.12", "2.0.1"},
-			expectedHighestSupportedVersion: "",
-			shouldFail:                      true,
-		},
-		{
-			versions:                        []string{"v1.2.3", "boo", "v0.3.0", "2.0.1"},
-			expectedHighestSupportedVersion: "1.2.3",
-			shouldFail:                      false,
-		},
-		{
-			versions:                        []string{},
-			expectedHighestSupportedVersion: "",
-			shouldFail:                      true,
-		},
-		{
-			versions:                        []string{"var", "boo", "foo"},
-			expectedHighestSupportedVersion: "",
-			shouldFail:                      true,
-		},
-	}
-
-	for _, tc := range testCases {
-		// Arrange & Act
-		actual, err := highestSupportedVersion(tc.versions)
-
-		// Assert
-		if tc.shouldFail && err == nil {
-			t.Fatalf("expecting highestSupportedVersion to fail, but got nil error for testcase: %#v", tc)
-		}
-		if !tc.shouldFail && err != nil {
-			t.Fatalf("unexpected error during ValidatePlugin for testcase: %#v\r\n err:%v", tc, err)
-		}
-		if tc.expectedHighestSupportedVersion != "" {
-			result, err := actual.Compare(tc.expectedHighestSupportedVersion)
-			if err != nil {
-				t.Fatalf("comparison failed with %v for testcase %#v", err, tc)
-			}
-			if result != 0 {
-				t.Fatalf("expectedHighestSupportedVersion %v, but got %v for tc: %#v", tc.expectedHighestSupportedVersion, actual, tc)
-			}
 		}
 	}
 }

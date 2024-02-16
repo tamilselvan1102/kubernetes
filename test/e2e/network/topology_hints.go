@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2edaemonset "k8s.io/kubernetes/test/e2e/framework/daemonset"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
@@ -40,32 +41,32 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
+var _ = common.SIGDescribe(feature.TopologyHints, func() {
 	f := framework.NewDefaultFramework("topology-hints")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	// filled in BeforeEach
 	var c clientset.Interface
 
-	ginkgo.BeforeEach(func() {
+	ginkgo.BeforeEach(func(ctx context.Context) {
 		c = f.ClientSet
-		e2eskipper.SkipUnlessMultizone(c)
+		e2eskipper.SkipUnlessMultizone(ctx, c)
 	})
 
-	ginkgo.It("should distribute endpoints evenly", func() {
-		portNum := 9376
+	ginkgo.It("should distribute endpoints evenly", func(ctx context.Context) {
+		portNum := int32(9376)
 		thLabels := map[string]string{labelKey: clientLabelValue}
 		img := imageutils.GetE2EImage(imageutils.Agnhost)
 		ports := []v1.ContainerPort{{ContainerPort: int32(portNum)}}
 		dsConf := e2edaemonset.NewDaemonSet("topology-serve-hostname", img, thLabels, nil, nil, ports, "serve-hostname")
-		ds, err := c.AppsV1().DaemonSets(f.Namespace.Name).Create(context.TODO(), dsConf, metav1.CreateOptions{})
+		ds, err := c.AppsV1().DaemonSets(f.Namespace.Name).Create(ctx, dsConf, metav1.CreateOptions{})
 		framework.ExpectNoError(err, "error creating DaemonSet")
 
-		svc := createServiceReportErr(c, f.Namespace.Name, &v1.Service{
+		svc := createServiceReportErr(ctx, c, f.Namespace.Name, &v1.Service{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "topology-hints",
 				Annotations: map[string]string{
-					v1.AnnotationTopologyAwareHints: "Auto",
+					v1.AnnotationTopologyMode: "Auto",
 				},
 			},
 			Spec: v1.ServiceSpec{
@@ -74,24 +75,24 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 				Ports: []v1.ServicePort{{
 					Name:       "example",
 					Port:       80,
-					TargetPort: intstr.FromInt(portNum),
+					TargetPort: intstr.FromInt32(portNum),
 					Protocol:   v1.ProtocolTCP,
 				}},
 			},
 		})
 
-		err = wait.Poll(5*time.Second, framework.PodStartTimeout, func() (bool, error) {
-			return e2edaemonset.CheckRunningOnAllNodes(f, ds)
+		err = wait.PollWithContext(ctx, 5*time.Second, framework.PodStartTimeout, func(ctx context.Context) (bool, error) {
+			return e2edaemonset.CheckRunningOnAllNodes(ctx, f, ds)
 		})
 		framework.ExpectNoError(err, "timed out waiting for DaemonSets to be ready")
 
 		// All Nodes should have same allocatable CPUs. If not, then skip the test.
 		schedulableNodes := map[string]*v1.Node{}
-		for _, nodeName := range e2edaemonset.SchedulableNodes(c, ds) {
+		for _, nodeName := range e2edaemonset.SchedulableNodes(ctx, c, ds) {
 			schedulableNodes[nodeName] = nil
 		}
 
-		nodeList, err := c.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+		nodeList, err := c.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 		framework.ExpectNoError(err, "Error when listing all Nodes")
 		var lastNodeCPU resource.Quantity
 		firstNode := true
@@ -118,8 +119,8 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 		framework.Logf("Waiting for %d endpoints to be tracked in EndpointSlices", len(schedulableNodes))
 
 		var finalSlices []discoveryv1.EndpointSlice
-		err = wait.Poll(5*time.Second, 3*time.Minute, func() (bool, error) {
-			slices, listErr := c.DiscoveryV1().EndpointSlices(f.Namespace.Name).List(context.TODO(), metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", discoveryv1.LabelServiceName, svc.Name)})
+		err = wait.PollWithContext(ctx, 5*time.Second, 3*time.Minute, func(ctx context.Context) (bool, error) {
+			slices, listErr := c.DiscoveryV1().EndpointSlices(f.Namespace.Name).List(ctx, metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", discoveryv1.LabelServiceName, svc.Name)})
 			if listErr != nil {
 				return false, listErr
 			}
@@ -165,7 +166,7 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 			}
 		}
 
-		podList, err := c.CoreV1().Pods(f.Namespace.Name).List(context.TODO(), metav1.ListOptions{})
+		podList, err := c.CoreV1().Pods(f.Namespace.Name).List(ctx, metav1.ListOptions{})
 		framework.ExpectNoError(err)
 		podsByZone := map[string]string{}
 		for _, pod := range podList.Items {
@@ -184,14 +185,14 @@ var _ = common.SIGDescribe("[Feature:Topology Hints]", func() {
 			cmd := fmt.Sprintf(`date; for i in $(seq 1 3000); do sleep 1; echo "Date: $(date) Try: ${i}"; curl -q -s --connect-timeout 2 http://%s:80/ ; echo; done`, svc.Name)
 			clientPod.Spec.Containers[0].Command = []string{"/bin/sh", "-c", cmd}
 			clientPod.Spec.Containers[0].Name = clientPod.Name
-			e2epod.NewPodClient(f).CreateSync(clientPod)
+			e2epod.NewPodClient(f).CreateSync(ctx, clientPod)
 
 			framework.Logf("Ensuring that requests from %s pod on %s node stay in %s zone", clientPod.Name, nodeName, fromZone)
 
 			var logs string
-			if pollErr := wait.Poll(5*time.Second, e2eservice.KubeProxyLagTimeout, func() (bool, error) {
+			if pollErr := wait.PollWithContext(ctx, 5*time.Second, e2eservice.KubeProxyLagTimeout, func(ctx context.Context) (bool, error) {
 				var err error
-				logs, err = e2epod.GetPodLogs(c, f.Namespace.Name, clientPod.Name, clientPod.Name)
+				logs, err = e2epod.GetPodLogs(ctx, c, f.Namespace.Name, clientPod.Name, clientPod.Name)
 				framework.ExpectNoError(err)
 				framework.Logf("Pod client logs: %s", logs)
 

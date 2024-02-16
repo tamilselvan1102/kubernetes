@@ -392,6 +392,7 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	out.NodeStatusReportFrequency = in.NodeStatusReportFrequency
 	out.NodeLeaseDurationSeconds = in.NodeLeaseDurationSeconds
 	out.ImageMinimumGCAge = in.ImageMinimumGCAge
+	out.ImageMaximumGCAge = in.ImageMaximumGCAge
 	if err := v1.Convert_Pointer_int32_To_int32(&in.ImageGCHighThresholdPercent, &out.ImageGCHighThresholdPercent, s); err != nil {
 		return err
 	}
@@ -412,6 +413,7 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	out.MemoryManagerPolicy = in.MemoryManagerPolicy
 	out.TopologyManagerPolicy = in.TopologyManagerPolicy
 	out.TopologyManagerScope = in.TopologyManagerScope
+	out.TopologyManagerPolicyOptions = *(*map[string]string)(unsafe.Pointer(&in.TopologyManagerPolicyOptions))
 	out.QOSReserved = *(*map[string]string)(unsafe.Pointer(&in.QOSReserved))
 	out.RuntimeRequestTimeout = in.RuntimeRequestTimeout
 	out.HairpinMode = in.HairpinMode
@@ -442,6 +444,7 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	if err := v1.Convert_Pointer_bool_To_bool(&in.SerializeImagePulls, &out.SerializeImagePulls, s); err != nil {
 		return err
 	}
+	out.MaxParallelImagePulls = (*int32)(unsafe.Pointer(in.MaxParallelImagePulls))
 	out.EvictionHard = *(*map[string]string)(unsafe.Pointer(&in.EvictionHard))
 	out.EvictionSoft = *(*map[string]string)(unsafe.Pointer(&in.EvictionSoft))
 	out.EvictionSoftGracePeriod = *(*map[string]string)(unsafe.Pointer(&in.EvictionSoftGracePeriod))
@@ -473,6 +476,12 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	if err := v1.Convert_Pointer_int32_To_int32(&in.ContainerLogMaxFiles, &out.ContainerLogMaxFiles, s); err != nil {
 		return err
 	}
+	if err := v1.Convert_Pointer_int32_To_int32(&in.ContainerLogMaxWorkers, &out.ContainerLogMaxWorkers, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_Pointer_v1_Duration_To_v1_Duration(&in.ContainerLogMonitorInterval, &out.ContainerLogMonitorInterval, s); err != nil {
+		return err
+	}
 	out.ConfigMapAndSecretChangeDetectionStrategy = config.ResourceChangeDetectionStrategy(in.ConfigMapAndSecretChangeDetectionStrategy)
 	out.SystemReserved = *(*map[string]string)(unsafe.Pointer(&in.SystemReserved))
 	out.KubeReserved = *(*map[string]string)(unsafe.Pointer(&in.KubeReserved))
@@ -487,6 +496,9 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	out.KernelMemcgNotification = in.KernelMemcgNotification
 	out.Logging = in.Logging
 	if err := v1.Convert_Pointer_bool_To_bool(&in.EnableSystemLogHandler, &out.EnableSystemLogHandler, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_Pointer_bool_To_bool(&in.EnableSystemLogQuery, &out.EnableSystemLogQuery, s); err != nil {
 		return err
 	}
 	out.ShutdownGracePeriod = in.ShutdownGracePeriod
@@ -511,6 +523,8 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	if err := v1.Convert_Pointer_bool_To_bool(&in.LocalStorageCapacityIsolation, &out.LocalStorageCapacityIsolation, s); err != nil {
 		return err
 	}
+	out.ContainerRuntimeEndpoint = in.ContainerRuntimeEndpoint
+	out.ImageServiceEndpoint = in.ImageServiceEndpoint
 	return nil
 }
 
@@ -572,6 +586,7 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	out.NodeStatusReportFrequency = in.NodeStatusReportFrequency
 	out.NodeLeaseDurationSeconds = in.NodeLeaseDurationSeconds
 	out.ImageMinimumGCAge = in.ImageMinimumGCAge
+	out.ImageMaximumGCAge = in.ImageMaximumGCAge
 	if err := v1.Convert_int32_To_Pointer_int32(&in.ImageGCHighThresholdPercent, &out.ImageGCHighThresholdPercent, s); err != nil {
 		return err
 	}
@@ -592,6 +607,7 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	out.MemoryManagerPolicy = in.MemoryManagerPolicy
 	out.TopologyManagerPolicy = in.TopologyManagerPolicy
 	out.TopologyManagerScope = in.TopologyManagerScope
+	out.TopologyManagerPolicyOptions = *(*map[string]string)(unsafe.Pointer(&in.TopologyManagerPolicyOptions))
 	out.QOSReserved = *(*map[string]string)(unsafe.Pointer(&in.QOSReserved))
 	out.RuntimeRequestTimeout = in.RuntimeRequestTimeout
 	out.HairpinMode = in.HairpinMode
@@ -622,6 +638,7 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	if err := v1.Convert_bool_To_Pointer_bool(&in.SerializeImagePulls, &out.SerializeImagePulls, s); err != nil {
 		return err
 	}
+	out.MaxParallelImagePulls = (*int32)(unsafe.Pointer(in.MaxParallelImagePulls))
 	out.EvictionHard = *(*map[string]string)(unsafe.Pointer(&in.EvictionHard))
 	out.EvictionSoft = *(*map[string]string)(unsafe.Pointer(&in.EvictionSoft))
 	out.EvictionSoftGracePeriod = *(*map[string]string)(unsafe.Pointer(&in.EvictionSoftGracePeriod))
@@ -653,6 +670,12 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	if err := v1.Convert_int32_To_Pointer_int32(&in.ContainerLogMaxFiles, &out.ContainerLogMaxFiles, s); err != nil {
 		return err
 	}
+	if err := v1.Convert_int32_To_Pointer_int32(&in.ContainerLogMaxWorkers, &out.ContainerLogMaxWorkers, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_v1_Duration_To_Pointer_v1_Duration(&in.ContainerLogMonitorInterval, &out.ContainerLogMonitorInterval, s); err != nil {
+		return err
+	}
 	out.ConfigMapAndSecretChangeDetectionStrategy = v1beta1.ResourceChangeDetectionStrategy(in.ConfigMapAndSecretChangeDetectionStrategy)
 	out.AllowedUnsafeSysctls = *(*[]string)(unsafe.Pointer(&in.AllowedUnsafeSysctls))
 	out.KernelMemcgNotification = in.KernelMemcgNotification
@@ -665,6 +688,9 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	out.ShowHiddenMetricsForVersion = in.ShowHiddenMetricsForVersion
 	out.Logging = in.Logging
 	if err := v1.Convert_bool_To_Pointer_bool(&in.EnableSystemLogHandler, &out.EnableSystemLogHandler, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_bool_To_Pointer_bool(&in.EnableSystemLogQuery, &out.EnableSystemLogQuery, s); err != nil {
 		return err
 	}
 	out.ShutdownGracePeriod = in.ShutdownGracePeriod
@@ -689,6 +715,8 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	if err := v1.Convert_bool_To_Pointer_bool(&in.LocalStorageCapacityIsolation, &out.LocalStorageCapacityIsolation, s); err != nil {
 		return err
 	}
+	out.ContainerRuntimeEndpoint = in.ContainerRuntimeEndpoint
+	out.ImageServiceEndpoint = in.ImageServiceEndpoint
 	return nil
 }
 

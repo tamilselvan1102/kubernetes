@@ -20,21 +20,22 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/armon/go-socks5"
-	"github.com/elazarl/goproxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"k8s.io/apimachinery/pkg/util/httpstream"
+	utilnettesting "k8s.io/apimachinery/pkg/util/net/testing"
 )
 
 type serverHandlerConfig struct {
@@ -291,6 +292,16 @@ func TestRoundTripAndNewConnection(t *testing.T) {
 			serverStatusCode:       http.StatusSwitchingProtocols,
 			shouldError:            false,
 		},
+		"proxied valid https, proxy auth with chars that percent escape -> valid https": {
+			serverFunc:             httpsServerValidHostname(t),
+			proxyServerFunc:        httpsServerValidHostname(t),
+			proxyAuth:              url.UserPassword("proxy user", "proxypasswd%"),
+			clientTLS:              &tls.Config{RootCAs: localhostPool},
+			serverConnectionHeader: "Upgrade",
+			serverUpgradeHeader:    "SPDY/3.1",
+			serverStatusCode:       http.StatusSwitchingProtocols,
+			shouldError:            false,
+		},
 	}
 
 	for k, testCase := range testCases {
@@ -304,6 +315,7 @@ func TestRoundTripAndNewConnection(t *testing.T) {
 				},
 			))
 			defer server.Close()
+			t.Logf("Server URL: %v", server.URL)
 
 			serverURL, err := url.Parse(server.URL)
 			if err != nil {
@@ -314,25 +326,30 @@ func TestRoundTripAndNewConnection(t *testing.T) {
 				t.Fatalf("error creating request: %s", err)
 			}
 
-			spdyTransport := NewRoundTripper(testCase.clientTLS)
+			spdyTransport, err := NewRoundTripper(testCase.clientTLS)
+			if err != nil {
+				t.Fatalf("error creating SpdyRoundTripper: %v", err)
+			}
 
 			var proxierCalled bool
 			var proxyCalledWithHost string
 			var proxyCalledWithAuth bool
 			var proxyCalledWithAuthHeader string
 			if testCase.proxyServerFunc != nil {
-				proxyHandler := goproxy.NewProxyHttpServer()
-
-				proxyHandler.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-					proxyCalledWithHost = host
+				proxyHandler := utilnettesting.NewHTTPProxyHandler(t, func(req *http.Request) bool {
+					proxyCalledWithHost = req.Host
 
 					proxyAuthHeaderName := "Proxy-Authorization"
-					_, proxyCalledWithAuth = ctx.Req.Header[proxyAuthHeaderName]
-					proxyCalledWithAuthHeader = ctx.Req.Header.Get(proxyAuthHeaderName)
-					return goproxy.OkConnect, host
+					_, proxyCalledWithAuth = req.Header[proxyAuthHeaderName]
+					proxyCalledWithAuthHeader = req.Header.Get(proxyAuthHeaderName)
+					return true
 				})
+				defer proxyHandler.Wait()
 
 				proxy := testCase.proxyServerFunc(proxyHandler)
+				defer proxy.Close()
+
+				t.Logf("Proxy URL: %v", proxy.URL)
 
 				spdyTransport.proxier = func(proxierReq *http.Request) (*url.URL, error) {
 					proxierCalled = true
@@ -343,7 +360,6 @@ func TestRoundTripAndNewConnection(t *testing.T) {
 					proxyURL.User = testCase.proxyAuth
 					return proxyURL, nil
 				}
-				defer proxy.Close()
 			}
 
 			client := &http.Client{Transport: spdyTransport}
@@ -400,18 +416,87 @@ func TestRoundTripAndNewConnection(t *testing.T) {
 				}
 			}
 
-			var expectedProxyAuth string
 			if testCase.proxyAuth != nil {
-				encodedCredentials := base64.StdEncoding.EncodeToString([]byte(testCase.proxyAuth.String()))
-				expectedProxyAuth = "Basic " + encodedCredentials
-			}
-			if len(expectedProxyAuth) == 0 && proxyCalledWithAuth {
+				expectedUsername := testCase.proxyAuth.Username()
+				expectedPassword, _ := testCase.proxyAuth.Password()
+				username, password, ok := (&http.Request{Header: http.Header{"Authorization": []string{proxyCalledWithAuthHeader}}}).BasicAuth()
+				if !ok {
+					t.Fatalf("invalid proxy auth header %s", proxyCalledWithAuthHeader)
+				}
+				if username != expectedUsername || password != expectedPassword {
+					t.Fatalf("expected proxy auth \"%s:%s\", got \"%s:%s\"", expectedUsername, expectedPassword, username, password)
+				}
+			} else if proxyCalledWithAuth {
 				t.Fatalf("proxy authorization unexpected, got %q", proxyCalledWithAuthHeader)
 			}
-			if proxyCalledWithAuthHeader != expectedProxyAuth {
-				t.Fatalf("expected to see a call to the proxy with credentials %q, got %q", testCase.proxyAuth, proxyCalledWithAuthHeader)
-			}
+		})
+	}
+}
 
+// Tests SpdyRoundTripper constructors
+func TestRoundTripConstuctor(t *testing.T) {
+	testCases := map[string]struct {
+		tlsConfig         *tls.Config
+		proxier           func(req *http.Request) (*url.URL, error)
+		upgradeTransport  http.RoundTripper
+		expectedTLSConfig *tls.Config
+		errMsg            string
+	}{
+		"Basic TLSConfig; no error": {
+			tlsConfig:         &tls.Config{InsecureSkipVerify: true},
+			expectedTLSConfig: &tls.Config{InsecureSkipVerify: true},
+			upgradeTransport:  nil,
+		},
+		"Basic TLSConfig and Proxier: no error": {
+			tlsConfig:         &tls.Config{InsecureSkipVerify: true},
+			proxier:           func(req *http.Request) (*url.URL, error) { return nil, nil },
+			expectedTLSConfig: &tls.Config{InsecureSkipVerify: true},
+			upgradeTransport:  nil,
+		},
+		"TLSConfig with UpgradeTransport: error": {
+			tlsConfig:         &tls.Config{InsecureSkipVerify: true},
+			upgradeTransport:  &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+			expectedTLSConfig: &tls.Config{InsecureSkipVerify: true},
+			errMsg:            "SpdyRoundTripper: UpgradeTransport is mutually exclusive to TLSConfig or Proxier",
+		},
+		"Proxier with UpgradeTransport: error": {
+			proxier:           func(req *http.Request) (*url.URL, error) { return nil, nil },
+			upgradeTransport:  &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+			expectedTLSConfig: &tls.Config{InsecureSkipVerify: true},
+			errMsg:            "SpdyRoundTripper: UpgradeTransport is mutually exclusive to TLSConfig or Proxier",
+		},
+		"Only UpgradeTransport: no error": {
+			upgradeTransport:  &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+			expectedTLSConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			spdyRoundTripper, err := NewRoundTripperWithConfig(
+				RoundTripperConfig{
+					TLS:              testCase.tlsConfig,
+					Proxier:          testCase.proxier,
+					UpgradeTransport: testCase.upgradeTransport,
+				},
+			)
+			if testCase.errMsg != "" {
+				if err == nil {
+					t.Fatalf("expected error but received none")
+				}
+				if !strings.Contains(err.Error(), testCase.errMsg) {
+					t.Fatalf("expected error message (%s), got (%s)", err.Error(), testCase.errMsg)
+				}
+			}
+			if testCase.errMsg == "" {
+				if err != nil {
+					t.Fatalf("unexpected error received: %v", err)
+				}
+				actualTLSConfig := spdyRoundTripper.TLSClientConfig()
+				if !reflect.DeepEqual(testCase.expectedTLSConfig, actualTLSConfig) {
+					t.Errorf("expected TLSConfig (%v), got (%v)",
+						testCase.expectedTLSConfig, actualTLSConfig)
+				}
+			}
 		})
 	}
 }
@@ -532,7 +617,10 @@ func TestRoundTripSocks5AndNewConnection(t *testing.T) {
 				t.Fatalf("error creating request: %s", err)
 			}
 
-			spdyTransport := NewRoundTripper(testCase.clientTLS)
+			spdyTransport, err := NewRoundTripper(testCase.clientTLS)
+			if err != nil {
+				t.Fatalf("error creating SpdyRoundTripper: %v", err)
+			}
 			var proxierCalled bool
 			var proxyCalledWithHost string
 
@@ -692,7 +780,10 @@ func TestRoundTripPassesContextToDialer(t *testing.T) {
 			cancel()
 			req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 			require.NoError(t, err)
-			spdyTransport := NewRoundTripper(&tls.Config{})
+			spdyTransport, err := NewRoundTripper(&tls.Config{})
+			if err != nil {
+				t.Fatalf("error creating SpdyRoundTripper: %v", err)
+			}
 			_, err = spdyTransport.Dial(req)
 			assert.EqualError(t, err, "dial tcp 127.0.0.1:1233: operation was canceled")
 		})

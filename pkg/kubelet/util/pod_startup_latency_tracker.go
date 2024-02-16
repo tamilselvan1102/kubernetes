@@ -102,13 +102,15 @@ func (p *basicPodStartupLatencyTracker) ObservedPodOnWatch(pod *v1.Pod, when tim
 		klog.InfoS("Observed pod startup duration",
 			"pod", klog.KObj(pod),
 			"podStartSLOduration", podStartSLOduration,
-			"pod.CreationTimestamp", pod.CreationTimestamp.Time,
+			"podStartE2EDuration", podStartingDuration,
+			"podCreationTimestamp", pod.CreationTimestamp.Time,
 			"firstStartedPulling", state.firstStartedPulling,
 			"lastFinishedPulling", state.lastFinishedPulling,
 			"observedRunningTime", state.observedRunningTime,
 			"watchObservedRunningTime", when)
 
 		metrics.PodStartSLIDuration.WithLabelValues().Observe(podStartSLOduration)
+		metrics.PodStartTotalDuration.WithLabelValues().Observe(podStartingDuration.Seconds())
 		state.metricRecorded = true
 	}
 }

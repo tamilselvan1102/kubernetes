@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/klog/v2/ktesting"
 	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller/replication"
@@ -122,7 +123,9 @@ func rmSetup(t *testing.T) (kubeapiservertesting.TearDownFunc, *replication.Repl
 	resyncPeriod := 12 * time.Hour
 	informers := informers.NewSharedInformerFactory(clientset.NewForConfigOrDie(restclient.AddUserAgent(config, "rc-informers")), resyncPeriod)
 
+	logger, _ := ktesting.NewTestContext(t)
 	rm := replication.NewReplicationManager(
+		logger,
 		informers.Core().V1().Pods(),
 		informers.Core().V1().ReplicationControllers(),
 		clientset.NewForConfigOrDie(restclient.AddUserAgent(config, "replication-controller")),
@@ -682,16 +685,17 @@ func TestPodOrphaningAndAdoptionWhenLabelsChange(t *testing.T) {
 		if err != nil {
 			// If the pod is not found, it means the RC picks the pod for deletion (it is extra)
 			// Verify there is only one pod in namespace and it has ControllerRef to the RC
-			if apierrors.IsNotFound(err) {
-				pods := getPods(t, podClient, labelMap())
-				if len(pods.Items) != 1 {
-					return false, fmt.Errorf("Expected 1 pod in current namespace, got %d", len(pods.Items))
-				}
-				// Set the pod accordingly
-				pod = &pods.Items[0]
-				return true, nil
+			if !apierrors.IsNotFound(err) {
+				return false, err
 			}
-			return false, err
+
+			pods := getPods(t, podClient, labelMap())
+			if len(pods.Items) != 1 {
+				return false, fmt.Errorf("Expected 1 pod in current namespace, got %d", len(pods.Items))
+			}
+			// Set the pod accordingly
+			pod = &pods.Items[0]
+			return true, nil
 		}
 		// Always update the pod so that we can save a GET call to API server later
 		pod = newPod

@@ -18,6 +18,9 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
+# Short-circuit if init.sh has already been sourced
+[[ $(type -t kube::init::loaded) == function ]] && return 0
+
 # Unset CDPATH so that path interpolation can work correctly
 # https://github.com/kubernetes/kubernetes/issues/52255
 unset CDPATH
@@ -27,6 +30,13 @@ unset CDPATH
 # As individual scripts (like hack/update-vendor.sh) make use of go modules,
 # they can explicitly set GO111MODULE=on
 export GO111MODULE=off
+
+# FIXME(dims): Note that here we assume that if GOFLAGS are already set we
+# leave them as-is and not try to add providerless to it. So if you
+# really need to set your own GOFLAGS, ensure you add "providerless" explicitly
+if [[ "${KUBE_PROVIDERLESS:-"n"}" == "y" ]]; then
+  export GOFLAGS=${GOFLAGS:-"-tags=providerless"}
+fi
 
 # The root of the build/dist directory
 KUBE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -65,6 +75,7 @@ export KUBE_OUTPUT_HOSTBIN
 KUBE_AVAILABLE_GROUP_VERSIONS="${KUBE_AVAILABLE_GROUP_VERSIONS:-\
 v1 \
 admissionregistration.k8s.io/v1 \
+admissionregistration.k8s.io/v1alpha1 \
 admissionregistration.k8s.io/v1beta1 \
 admission.k8s.io/v1 \
 admission.k8s.io/v1beta1 \
@@ -84,10 +95,12 @@ batch/v1 \
 batch/v1beta1 \
 certificates.k8s.io/v1 \
 certificates.k8s.io/v1beta1 \
+certificates.k8s.io/v1alpha1 \
 coordination.k8s.io/v1beta1 \
 coordination.k8s.io/v1 \
 discovery.k8s.io/v1 \
 discovery.k8s.io/v1beta1 \
+resource.k8s.io/v1alpha2 \
 extensions/v1beta1 \
 events.k8s.io/v1 \
 events.k8s.io/v1beta1 \
@@ -109,7 +122,7 @@ scheduling.k8s.io/v1 \
 storage.k8s.io/v1beta1 \
 storage.k8s.io/v1 \
 storage.k8s.io/v1alpha1 \
-flowcontrol.apiserver.k8s.io/v1alpha1 \
+flowcontrol.apiserver.k8s.io/v1 \
 flowcontrol.apiserver.k8s.io/v1beta1 \
 flowcontrol.apiserver.k8s.io/v1beta2 \
 flowcontrol.apiserver.k8s.io/v1beta3 \
@@ -208,4 +221,9 @@ kube::realpath() {
     return 1
   fi
   kube::readlinkdashf "${1}"
+}
+
+# Marker function to indicate init.sh has been fully sourced
+kube::init::loaded() {
+  return 0
 }

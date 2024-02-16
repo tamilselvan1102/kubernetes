@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -34,31 +35,33 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats [Serial]", func() {
+var _ = sigDescribe(feature.Windows, "Kubelet-Stats", framework.WithSerial(), skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("kubelet-stats-test-windows-serial")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("Kubelet stats collection for Windows nodes", func() {
 
 		ginkgo.Context("when running 10 pods", func() {
 			// 10 seconds is the default scrape timeout for metrics-server and kube-prometheus
-			ginkgo.It("should return within 10 seconds", func() {
+			ginkgo.It("should return within 10 seconds", func(ctx context.Context) {
 
 				ginkgo.By("Selecting a Windows node")
-				targetNode, err := findWindowsNode(f)
+				targetNode, err := findWindowsNode(ctx, f)
 				framework.ExpectNoError(err, "Error finding Windows node")
 				framework.Logf("Using node: %v", targetNode.Name)
 
 				ginkgo.By("Scheduling 10 pods")
 				powershellImage := imageutils.GetConfig(imageutils.BusyBox)
 				pods := newKubeletStatsTestPods(10, powershellImage, targetNode.Name)
-				e2epod.NewPodClient(f).CreateBatch(pods)
+				e2epod.NewPodClient(f).CreateBatch(ctx, pods)
 
 				ginkgo.By("Waiting up to 3 minutes for pods to be running")
 				timeout := 3 * time.Minute
-				e2epod.WaitForPodsRunningReady(f.ClientSet, f.Namespace.Name, 10, 0, timeout, make(map[string]string))
+				err = e2epod.WaitForPodsRunningReady(ctx, f.ClientSet, f.Namespace.Name, 10, 0, timeout)
+				framework.ExpectNoError(err)
 
 				ginkgo.By("Getting kubelet stats 5 times and checking average duration")
 				iterations := 5
@@ -66,7 +69,7 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats [Serial]", func() {
 
 				for i := 0; i < iterations; i++ {
 					start := time.Now()
-					nodeStats, err := e2ekubelet.GetStatsSummary(f.ClientSet, targetNode.Name)
+					nodeStats, err := e2ekubelet.GetStatsSummary(ctx, f.ClientSet, targetNode.Name)
 					duration := time.Since(start)
 					totalDurationMs += duration.Milliseconds()
 
@@ -96,7 +99,7 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats [Serial]", func() {
 							}
 						}
 					}
-					framework.ExpectEqual(statsChecked, 10, "Should find stats for 10 pods in kubelet stats")
+					gomega.Expect(statsChecked).To(gomega.Equal(10), "Should find stats for 10 pods in kubelet stats")
 
 					time.Sleep(5 * time.Second)
 				}
@@ -111,17 +114,18 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats [Serial]", func() {
 			})
 		})
 	})
-})
-var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats", func() {
+}))
+
+var _ = sigDescribe(feature.Windows, "Kubelet-Stats", skipUnlessWindows(func() {
 	f := framework.NewDefaultFramework("kubelet-stats-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	ginkgo.Describe("Kubelet stats collection for Windows nodes", func() {
 
 		ginkgo.Context("when windows is booted", func() {
-			ginkgo.It("should return bootid within 10 seconds", func() {
+			ginkgo.It("should return bootid within 10 seconds", func(ctx context.Context) {
 				ginkgo.By("Selecting a Windows node")
-				targetNode, err := findWindowsNode(f)
+				targetNode, err := findWindowsNode(ctx, f)
 				framework.ExpectNoError(err, "Error finding Windows node")
 				framework.Logf("Using node: %v", targetNode.Name)
 
@@ -134,21 +138,22 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats", func() {
 
 		ginkgo.Context("when running 3 pods", func() {
 			// 10 seconds is the default scrape timeout for metrics-server and kube-prometheus
-			ginkgo.It("should return within 10 seconds", func() {
+			ginkgo.It("should return within 10 seconds", func(ctx context.Context) {
 
 				ginkgo.By("Selecting a Windows node")
-				targetNode, err := findWindowsNode(f)
+				targetNode, err := findWindowsNode(ctx, f)
 				framework.ExpectNoError(err, "Error finding Windows node")
 				framework.Logf("Using node: %v", targetNode.Name)
 
 				ginkgo.By("Scheduling 3 pods")
 				powershellImage := imageutils.GetConfig(imageutils.BusyBox)
 				pods := newKubeletStatsTestPods(3, powershellImage, targetNode.Name)
-				e2epod.NewPodClient(f).CreateBatch(pods)
+				e2epod.NewPodClient(f).CreateBatch(ctx, pods)
 
 				ginkgo.By("Waiting up to 3 minutes for pods to be running")
 				timeout := 3 * time.Minute
-				e2epod.WaitForPodsRunningReady(f.ClientSet, f.Namespace.Name, 3, 0, timeout, make(map[string]string))
+				err = e2epod.WaitForPodsRunningReady(ctx, f.ClientSet, f.Namespace.Name, 3, 0, timeout)
+				framework.ExpectNoError(err)
 
 				ginkgo.By("Getting kubelet stats 1 time")
 				iterations := 1
@@ -156,7 +161,7 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats", func() {
 
 				for i := 0; i < iterations; i++ {
 					start := time.Now()
-					nodeStats, err := e2ekubelet.GetStatsSummary(f.ClientSet, targetNode.Name)
+					nodeStats, err := e2ekubelet.GetStatsSummary(ctx, f.ClientSet, targetNode.Name)
 					duration := time.Since(start)
 					totalDurationMs += duration.Milliseconds()
 
@@ -186,7 +191,7 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats", func() {
 							}
 						}
 					}
-					framework.ExpectEqual(statsChecked, 3, "Should find stats for 10 pods in kubelet stats")
+					gomega.Expect(statsChecked).To(gomega.Equal(3), "Should find stats for 3 pods in kubelet stats")
 
 					time.Sleep(5 * time.Second)
 				}
@@ -201,12 +206,12 @@ var _ = SIGDescribe("[Feature:Windows] Kubelet-Stats", func() {
 			})
 		})
 	})
-})
+}))
 
 // findWindowsNode finds a Windows node that is Ready and Schedulable
-func findWindowsNode(f *framework.Framework) (v1.Node, error) {
+func findWindowsNode(ctx context.Context, f *framework.Framework) (v1.Node, error) {
 	selector := labels.Set{"kubernetes.io/os": "windows"}.AsSelector()
-	nodeList, err := f.ClientSet.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{LabelSelector: selector.String()})
+	nodeList, err := f.ClientSet.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 
 	if err != nil {
 		return v1.Node{}, err
@@ -222,7 +227,7 @@ func findWindowsNode(f *framework.Framework) (v1.Node, error) {
 		}
 	}
 
-	if foundNode == false {
+	if !foundNode {
 		e2eskipper.Skipf("Could not find and ready and schedulable Windows nodes")
 	}
 

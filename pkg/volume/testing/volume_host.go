@@ -17,18 +17,23 @@ limitations under the License.
 package testing
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
@@ -36,7 +41,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	cloudprovider "k8s.io/cloud-provider"
-	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
+	csilibplugins "k8s.io/csi-translation-lib/plugins"
 	. "k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	"k8s.io/kubernetes/pkg/volume/util/subpath"
@@ -70,7 +75,6 @@ type fakeVolumeHost struct {
 	informerFactory        informers.SharedInformerFactory
 	kubeletErr             error
 	mux                    sync.Mutex
-	filteredDialOptions    *proxyutil.FilteredDialOptions
 }
 
 var _ VolumeHost = &fakeVolumeHost{}
@@ -118,10 +122,6 @@ func (f *fakeVolumeHost) GetPodsDir() string {
 	return filepath.Join(f.rootDir, "pods")
 }
 
-func (f *fakeVolumeHost) GetHostIDsForPod(pod *v1.Pod, containerUID, containerGID *int64) (hostUID, hostGID *int64, err error) {
-	return containerUID, containerGID, nil
-}
-
 func (f *fakeVolumeHost) GetPodVolumeDir(podUID types.UID, pluginName, volumeName string) string {
 	return filepath.Join(f.rootDir, "pods", string(podUID), "volumes", pluginName, volumeName)
 }
@@ -148,10 +148,6 @@ func (f *fakeVolumeHost) GetMounter(pluginName string) mount.Interface {
 
 func (f *fakeVolumeHost) GetSubpather() subpath.Interface {
 	return f.subpather
-}
-
-func (f *fakeVolumeHost) GetFilteredDialOptions() *proxyutil.FilteredDialOptions {
-	return f.filteredDialOptions
 }
 
 func (f *fakeVolumeHost) GetPluginMgr() *VolumePluginMgr {
@@ -291,8 +287,28 @@ func newFakeAttachDetachVolumeHost(t *testing.T, rootDir string, kubeClient clie
 }
 
 func (f *fakeAttachDetachVolumeHost) CSINodeLister() storagelistersv1.CSINodeLister {
-	// not needed for testing
-	return nil
+	csiNode := &storagev1.CSINode{
+		ObjectMeta: metav1.ObjectMeta{Name: f.nodeName},
+		Spec: storagev1.CSINodeSpec{
+			Drivers: []storagev1.CSINodeDriver{},
+		},
+	}
+	enableMigrationOnNode(csiNode, csilibplugins.GCEPDInTreePluginName)
+	return getFakeCSINodeLister(csiNode)
+}
+
+func enableMigrationOnNode(csiNode *storagev1.CSINode, pluginName string) {
+	nodeInfoAnnotations := csiNode.GetAnnotations()
+	if nodeInfoAnnotations == nil {
+		nodeInfoAnnotations = map[string]string{}
+	}
+
+	newAnnotationSet := sets.NewString()
+	newAnnotationSet.Insert(pluginName)
+	nas := strings.Join(newAnnotationSet.List(), ",")
+	nodeInfoAnnotations[v1.MigratedPluginsAnnotationKey] = nas
+
+	csiNode.Annotations = nodeInfoAnnotations
 }
 
 func (f *fakeAttachDetachVolumeHost) CSIDriverLister() storagelistersv1.CSIDriverLister {
@@ -320,12 +336,6 @@ func NewFakeKubeletVolumeHost(t *testing.T, rootDir string, kubeClient clientset
 
 func NewFakeKubeletVolumeHostWithCloudProvider(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, cloud cloudprovider.Interface) *fakeKubeletVolumeHost {
 	return newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, cloud, nil, "", nil, nil)
-}
-
-func NewFakeKubeletVolumeHostWithNodeLabels(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, labels map[string]string) *fakeKubeletVolumeHost {
-	volHost := newFakeKubeletVolumeHost(t, rootDir, kubeClient, plugins, nil, nil, "", nil, nil)
-	volHost.nodeLabels = labels
-	return volHost
 }
 
 func NewFakeKubeletVolumeHostWithCSINodeName(t *testing.T, rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, nodeName string, driverLister storagelistersv1.CSIDriverLister, volumeAttachLister storagelistersv1.VolumeAttachmentLister) *fakeKubeletVolumeHost {
@@ -365,6 +375,31 @@ func (f *fakeKubeletVolumeHost) WithNode(node *v1.Node) *fakeKubeletVolumeHost {
 	return f
 }
 
+type CSINodeLister []storagev1.CSINode
+
+// Get returns a fake CSINode object.
+func (n CSINodeLister) Get(name string) (*storagev1.CSINode, error) {
+	for _, cn := range n {
+		if cn.Name == name {
+			return &cn, nil
+		}
+	}
+	return nil, fmt.Errorf("csiNode %q not found", name)
+}
+
+// List lists all CSINodes in the indexer.
+func (n CSINodeLister) List(selector labels.Selector) (ret []*storagev1.CSINode, err error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func getFakeCSINodeLister(csiNode *storagev1.CSINode) CSINodeLister {
+	csiNodeLister := CSINodeLister{}
+	if csiNode != nil {
+		csiNodeLister = append(csiNodeLister, *csiNode.DeepCopy())
+	}
+	return csiNodeLister
+}
+
 func (f *fakeKubeletVolumeHost) SetKubeletError(err error) {
 	f.mux.Lock()
 	defer f.mux.Unlock()
@@ -402,4 +437,31 @@ func (f *fakeKubeletVolumeHost) WaitForCacheSync() error {
 
 func (f *fakeKubeletVolumeHost) GetHostUtil() hostutil.HostUtils {
 	return f.hostUtil
+}
+
+func (f *fakeKubeletVolumeHost) GetTrustAnchorsByName(name string, allowMissing bool) ([]byte, error) {
+	ctb, err := f.kubeClient.CertificatesV1alpha1().ClusterTrustBundles().Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("while getting ClusterTrustBundle %s: %w", name, err)
+	}
+
+	return []byte(ctb.Spec.TrustBundle), nil
+}
+
+// Note: we do none of the deduplication and sorting that the real deal should do.
+func (f *fakeKubeletVolumeHost) GetTrustAnchorsBySigner(signerName string, labelSelector *metav1.LabelSelector, allowMissing bool) ([]byte, error) {
+	ctbList, err := f.kubeClient.CertificatesV1alpha1().ClusterTrustBundles().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("while listing all ClusterTrustBundles: %w", err)
+	}
+
+	fullSet := bytes.Buffer{}
+	for i, ctb := range ctbList.Items {
+		fullSet.WriteString(ctb.Spec.TrustBundle)
+		if i != len(ctbList.Items)-1 {
+			fullSet.WriteString("\n")
+		}
+	}
+
+	return fullSet.Bytes(), nil
 }

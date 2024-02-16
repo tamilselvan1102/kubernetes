@@ -17,92 +17,79 @@ limitations under the License.
 package cel
 
 import (
-	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apiserver/pkg/admission"
-	"k8s.io/apiserver/pkg/cel"
+	"context"
+	"time"
 
+	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types/ref"
+
+	v1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
+	"k8s.io/apiserver/pkg/cel/environment"
 )
 
-type FailurePolicy string
-
-const (
-	Fail   FailurePolicy = "Fail"
-	Ignore FailurePolicy = "Ignore"
-)
-
-// EvaluatorFunc represents the AND of one or more compiled CEL expression's
-// evaluators `params` may be nil if definition does not specify a paramsource
-type EvaluatorFunc func(a admission.Attributes, params *unstructured.Unstructured) []PolicyDecision
-
-// ObjectConverter is Dependency Injected into the PolicyDefinition's `Compile`
-// function to assist with converting types and values to/from CEL-typed values.
-type ObjectConverter interface {
-	// DeclForResource looks up the openapi or JSONSchemaProps, structural schema, etc.
-	// and compiles it into something that can be used to turn objects into CEL
-	// values
-	DeclForResource(gvr schema.GroupVersionResource) (*cel.DeclType, error)
-
-	// ValueForObject takes a Kubernetes Object and uses the CEL DeclType
-	// to transform it into a CEL value.
-	// Object may be a typed native object or an unstructured object
-	ValueForObject(value runtime.Object, decl *cel.DeclType) (ref.Val, error)
+type ExpressionAccessor interface {
+	GetExpression() string
+	ReturnTypes() []*cel.Type
 }
 
-// PolicyDefinition is an interface for internal policy binding type.
-// Implemented by mock/testing types, and to be implemented by the public API
-// types once they have completed API review.
-//
-// The interface closely mirrors the format and functionality of the
-// PolicyDefinition proposed in the KEP.
-type PolicyDefinition interface {
-	runtime.Object
+// NamedExpressionAccessor extends NamedExpressionAccessor with a name.
+type NamedExpressionAccessor interface {
+	ExpressionAccessor
 
-	// Matches says whether this policy definition matches the provided admission
-	// resource request
-	Matches(a admission.Attributes) bool
-
-	Compile(
-		// Definition is provided with a converter which may be used by the
-		// return evaluator function to convert objects into CEL-typed objects
-		objectConverter ObjectConverter,
-		// Injected RESTMapper to assist with compilation
-		mapper meta.RESTMapper,
-	) (EvaluatorFunc, error)
-
-	// GetParamSource returns the GVK for the CRD used as the source of
-	// parameters used in the evaluation of instances of this policy
-	// May return nil if there is no paramsource for this definition.
-	GetParamSource() *schema.GroupVersionKind
-
-	// GetFailurePolicy returns how an object should be treated during an
-	// admission when there is a configuration error preventing CEL evaluation
-	GetFailurePolicy() FailurePolicy
+	GetName() string // follows the naming convention of ExpressionAccessor
 }
 
-// PolicyBinding is an interface for internal policy binding type. Implemented
-// by mock/testing types, and to be implemented by the public API types once
-// they have completed API review.
-//
-// The interface closely mirrors the format and functionality of the
-// PolicyBinding proposed in the KEP.
-type PolicyBinding interface {
-	runtime.Object
+// EvaluationResult contains the minimal required fields and metadata of a cel evaluation
+type EvaluationResult struct {
+	EvalResult         ref.Val
+	ExpressionAccessor ExpressionAccessor
+	Elapsed            time.Duration
+	Error              error
+}
 
-	// Matches says whether this policy binding matches the provided admission
-	// resource request
-	Matches(a admission.Attributes) bool
+// OptionalVariableDeclarations declares which optional CEL variables
+// are declared for an expression.
+type OptionalVariableDeclarations struct {
+	// HasParams specifies if the "params" variable is declared.
+	// The "params" variable may still be bound to "null" when declared.
+	HasParams bool
+	// HasAuthorizer specifies if the"authorizer" and "authorizer.requestResource"
+	// variables are declared. When declared, the authorizer variables are
+	// expected to be non-null.
+	HasAuthorizer bool
+}
 
-	// GetTargetDefinition returns the Namespace/Name of Policy Definition used
-	// by this binding.
-	GetTargetDefinition() (namespace, name string)
+// FilterCompiler contains a function to assist with converting types and values to/from CEL-typed values.
+type FilterCompiler interface {
+	// Compile is used for the cel expression compilation
+	Compile(expressions []ExpressionAccessor, optionalDecls OptionalVariableDeclarations, envType environment.Type) Filter
+}
 
-	// GetTargetParams returns the Namespace/Name of instance of TargetDefinition's
-	// ParamSource to be provided to the CEL expressions of the definition during
-	// evaluation.
-	// If TargetDefinition has nil ParamSource, this is ignored.
-	GetTargetParams() (namespace, name string)
+// OptionalVariableBindings provides expression bindings for optional CEL variables.
+type OptionalVariableBindings struct {
+	// VersionedParams provides the "params" variable binding. This variable binding may
+	// be set to nil even when OptionalVariableDeclarations.HashParams is set to true.
+	VersionedParams runtime.Object
+	// Authorizer provides the authorizer used for the "authorizer" and
+	// "authorizer.requestResource" variable bindings. If the expression was compiled with
+	// OptionalVariableDeclarations.HasAuthorizer set to true this must be non-nil.
+	Authorizer authorizer.Authorizer
+}
+
+// Filter contains a function to evaluate compiled CEL-typed values
+// It expects the inbound object to already have been converted to the version expected
+// by the underlying CEL code (which is indicated by the match criteria of a policy definition).
+// versionedParams may be nil.
+type Filter interface {
+	// ForInput converts compiled CEL-typed values into evaluated CEL-typed value.
+	// runtimeCELCostBudget was added for testing purpose only. Callers should always use const RuntimeCELCostBudget from k8s.io/apiserver/pkg/apis/cel/config.go as input.
+	// If cost budget is calculated, the filter should return the remaining budget.
+	ForInput(ctx context.Context, versionedAttr *admission.VersionedAttributes, request *v1.AdmissionRequest, optionalVars OptionalVariableBindings, namespace *corev1.Namespace, runtimeCELCostBudget int64) ([]EvaluationResult, int64, error)
+
+	// CompilationErrors returns a list of errors from the compilation of the evaluator
+	CompilationErrors() []error
 }

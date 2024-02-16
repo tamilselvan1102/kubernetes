@@ -18,10 +18,12 @@ package v1
 
 import (
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
 	v1 "k8s.io/kube-scheduler/config/v1"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/names"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 // getDefaultPlugins returns the default set of plugins.
@@ -32,10 +34,10 @@ func getDefaultPlugins() *v1.Plugins {
 				{Name: names.PrioritySort},
 				{Name: names.NodeUnschedulable},
 				{Name: names.NodeName},
-				{Name: names.TaintToleration, Weight: pointer.Int32(3)},
-				{Name: names.NodeAffinity, Weight: pointer.Int32(2)},
+				{Name: names.TaintToleration, Weight: ptr.To[int32](3)},
+				{Name: names.NodeAffinity, Weight: ptr.To[int32](2)},
 				{Name: names.NodePorts},
-				{Name: names.NodeResourcesFit, Weight: pointer.Int32(1)},
+				{Name: names.NodeResourcesFit, Weight: ptr.To[int32](1)},
 				{Name: names.VolumeRestrictions},
 				{Name: names.EBSLimits},
 				{Name: names.GCEPDLimits},
@@ -43,37 +45,62 @@ func getDefaultPlugins() *v1.Plugins {
 				{Name: names.AzureDiskLimits},
 				{Name: names.VolumeBinding},
 				{Name: names.VolumeZone},
-				{Name: names.PodTopologySpread, Weight: pointer.Int32(2)},
-				{Name: names.InterPodAffinity, Weight: pointer.Int32(2)},
+				{Name: names.PodTopologySpread, Weight: ptr.To[int32](2)},
+				{Name: names.InterPodAffinity, Weight: ptr.To[int32](2)},
 				{Name: names.DefaultPreemption},
-				{Name: names.NodeResourcesBalancedAllocation, Weight: pointer.Int32(1)},
-				{Name: names.ImageLocality, Weight: pointer.Int32(1)},
+				{Name: names.NodeResourcesBalancedAllocation, Weight: ptr.To[int32](1)},
+				{Name: names.ImageLocality, Weight: ptr.To[int32](1)},
 				{Name: names.DefaultBinder},
 			},
 		},
 	}
+	applyFeatureGates(plugins)
 
 	return plugins
 }
 
+func applyFeatureGates(config *v1.Plugins) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodSchedulingReadiness) {
+		config.MultiPoint.Enabled = append(config.MultiPoint.Enabled, v1.Plugin{Name: names.SchedulingGates})
+	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.DynamicResourceAllocation) {
+		// This plugin should come before DefaultPreemption because if
+		// there is a problem with a Pod and PostFilter gets called to
+		// resolve the problem, it is better to first deallocate an
+		// idle ResourceClaim than it is to evict some Pod that might
+		// be doing useful work.
+		for i := range config.MultiPoint.Enabled {
+			if config.MultiPoint.Enabled[i].Name == names.DefaultPreemption {
+				extended := make([]v1.Plugin, 0, len(config.MultiPoint.Enabled)+1)
+				extended = append(extended, config.MultiPoint.Enabled[:i]...)
+				extended = append(extended, v1.Plugin{Name: names.DynamicResources})
+				extended = append(extended, config.MultiPoint.Enabled[i:]...)
+				config.MultiPoint.Enabled = extended
+				break
+			}
+		}
+	}
+}
+
 // mergePlugins merges the custom set into the given default one, handling disabled sets.
-func mergePlugins(defaultPlugins, customPlugins *v1.Plugins) *v1.Plugins {
+func mergePlugins(logger klog.Logger, defaultPlugins, customPlugins *v1.Plugins) *v1.Plugins {
 	if customPlugins == nil {
 		return defaultPlugins
 	}
 
-	defaultPlugins.MultiPoint = mergePluginSet(defaultPlugins.MultiPoint, customPlugins.MultiPoint)
-	defaultPlugins.QueueSort = mergePluginSet(defaultPlugins.QueueSort, customPlugins.QueueSort)
-	defaultPlugins.PreFilter = mergePluginSet(defaultPlugins.PreFilter, customPlugins.PreFilter)
-	defaultPlugins.Filter = mergePluginSet(defaultPlugins.Filter, customPlugins.Filter)
-	defaultPlugins.PostFilter = mergePluginSet(defaultPlugins.PostFilter, customPlugins.PostFilter)
-	defaultPlugins.PreScore = mergePluginSet(defaultPlugins.PreScore, customPlugins.PreScore)
-	defaultPlugins.Score = mergePluginSet(defaultPlugins.Score, customPlugins.Score)
-	defaultPlugins.Reserve = mergePluginSet(defaultPlugins.Reserve, customPlugins.Reserve)
-	defaultPlugins.Permit = mergePluginSet(defaultPlugins.Permit, customPlugins.Permit)
-	defaultPlugins.PreBind = mergePluginSet(defaultPlugins.PreBind, customPlugins.PreBind)
-	defaultPlugins.Bind = mergePluginSet(defaultPlugins.Bind, customPlugins.Bind)
-	defaultPlugins.PostBind = mergePluginSet(defaultPlugins.PostBind, customPlugins.PostBind)
+	defaultPlugins.MultiPoint = mergePluginSet(logger, defaultPlugins.MultiPoint, customPlugins.MultiPoint)
+	defaultPlugins.PreEnqueue = mergePluginSet(logger, defaultPlugins.PreEnqueue, customPlugins.PreEnqueue)
+	defaultPlugins.QueueSort = mergePluginSet(logger, defaultPlugins.QueueSort, customPlugins.QueueSort)
+	defaultPlugins.PreFilter = mergePluginSet(logger, defaultPlugins.PreFilter, customPlugins.PreFilter)
+	defaultPlugins.Filter = mergePluginSet(logger, defaultPlugins.Filter, customPlugins.Filter)
+	defaultPlugins.PostFilter = mergePluginSet(logger, defaultPlugins.PostFilter, customPlugins.PostFilter)
+	defaultPlugins.PreScore = mergePluginSet(logger, defaultPlugins.PreScore, customPlugins.PreScore)
+	defaultPlugins.Score = mergePluginSet(logger, defaultPlugins.Score, customPlugins.Score)
+	defaultPlugins.Reserve = mergePluginSet(logger, defaultPlugins.Reserve, customPlugins.Reserve)
+	defaultPlugins.Permit = mergePluginSet(logger, defaultPlugins.Permit, customPlugins.Permit)
+	defaultPlugins.PreBind = mergePluginSet(logger, defaultPlugins.PreBind, customPlugins.PreBind)
+	defaultPlugins.Bind = mergePluginSet(logger, defaultPlugins.Bind, customPlugins.Bind)
+	defaultPlugins.PostBind = mergePluginSet(logger, defaultPlugins.PostBind, customPlugins.PostBind)
 	return defaultPlugins
 }
 
@@ -82,11 +109,11 @@ type pluginIndex struct {
 	plugin v1.Plugin
 }
 
-func mergePluginSet(defaultPluginSet, customPluginSet v1.PluginSet) v1.PluginSet {
-	disabledPlugins := sets.NewString()
+func mergePluginSet(logger klog.Logger, defaultPluginSet, customPluginSet v1.PluginSet) v1.PluginSet {
+	disabledPlugins := sets.New[string]()
 	enabledCustomPlugins := make(map[string]pluginIndex)
 	// replacedPluginIndex is a set of index of plugins, which have replaced the default plugins.
-	replacedPluginIndex := sets.NewInt()
+	replacedPluginIndex := sets.New[int]()
 	var disabled []v1.Plugin
 	for _, disabledPlugin := range customPluginSet.Disabled {
 		// if the user is manually disabling any (or all, with "*") default plugins for an extension point,
@@ -114,7 +141,7 @@ func mergePluginSet(defaultPluginSet, customPluginSet v1.PluginSet) v1.PluginSet
 			}
 			// The default plugin is explicitly re-configured, update the default plugin accordingly.
 			if customPlugin, ok := enabledCustomPlugins[defaultEnabledPlugin.Name]; ok {
-				klog.InfoS("Default plugin is explicitly re-configured; overriding", "plugin", defaultEnabledPlugin.Name)
+				logger.Info("Default plugin is explicitly re-configured; overriding", "plugin", defaultEnabledPlugin.Name)
 				// Update the default plugin in place to preserve order.
 				defaultEnabledPlugin = customPlugin.plugin
 				replacedPluginIndex.Insert(customPlugin.index)

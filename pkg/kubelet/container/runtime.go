@@ -27,6 +27,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/util/flowcontrol"
@@ -51,6 +52,8 @@ type Version interface {
 type ImageSpec struct {
 	// ID of the image.
 	Image string
+	// Runtime handler used to pull this image
+	RuntimeHandler string
 	// The annotations for the image.
 	// This should be passed to CRI during image pulls and returned when images are listed.
 	Annotations []Annotation
@@ -122,6 +125,16 @@ type Runtime interface {
 	// CheckpointContainer tells the runtime to checkpoint a container
 	// and store the resulting archive to the checkpoint directory.
 	CheckpointContainer(ctx context.Context, options *runtimeapi.CheckpointContainerRequest) error
+	// Generate pod status from the CRI event
+	GeneratePodStatus(event *runtimeapi.ContainerEventResponse) (*PodStatus, error)
+	// ListMetricDescriptors gets the descriptors for the metrics that will be returned in ListPodSandboxMetrics.
+	// This list should be static at startup: either the client and server restart together when
+	// adding or removing metrics descriptors, or they should not change.
+	// Put differently, if ListPodSandboxMetrics references a name that is not described in the initial
+	// ListMetricDescriptors call, then the metric will not be broadcasted.
+	ListMetricDescriptors(ctx context.Context) ([]*runtimeapi.MetricDescriptor, error)
+	// ListPodSandboxMetrics retrieves the metrics for all pod sandboxes.
+	ListPodSandboxMetrics(ctx context.Context) ([]*runtimeapi.PodSandboxMetrics, error)
 }
 
 // StreamingRuntime is the interface implemented by runtimes that handle the serving of the
@@ -147,6 +160,10 @@ type ImageService interface {
 	RemoveImage(ctx context.Context, image ImageSpec) error
 	// ImageStats returns Image statistics.
 	ImageStats(ctx context.Context) (*ImageStats, error)
+	// ImageFsInfo returns a list of file systems for containers/images
+	ImageFsInfo(ctx context.Context) (*runtimeapi.ImageFsInfoResponse, error)
+	// GetImageSize returns the size of the image
+	GetImageSize(ctx context.Context, image ImageSpec) (uint64, error)
 }
 
 // Attacher interface allows to attach a container.
@@ -243,17 +260,6 @@ func (c *ContainerID) UnmarshalJSON(data []byte) error {
 	return c.ParseString(string(data))
 }
 
-// DockerID is an ID of docker container. It is a type to make it clear when we're working with docker container Ids
-type DockerID string
-
-// ContainerID converts DockerID into a ContainerID.
-func (id DockerID) ContainerID() ContainerID {
-	return ContainerID{
-		Type: "docker",
-		ID:   string(id),
-	}
-}
-
 // State represents the state of a container
 type State string
 
@@ -282,9 +288,16 @@ type Container struct {
 	Image string
 	// The id of the image used by the container.
 	ImageID string
+	// Runtime handler used to pull the image if any.
+	ImageRuntimeHandler string
 	// Hash of the container, used for comparison. Optional for containers
 	// not managed by kubelet.
 	Hash uint64
+	// Hash of the container over fields with Resources field zero'd out.
+	// NOTE: This is needed during alpha and beta so that containers using Resources are
+	// not unexpectedly restarted when InPlacePodVerticalScaling feature-gate is toggled.
+	//TODO(vinaykul,InPlacePodVerticalScaling): Remove this in GA+1 and make HashWithoutResources to become Hash.
+	HashWithoutResources uint64
 	// State is the state of the container.
 	State State
 }
@@ -305,6 +318,20 @@ type PodStatus struct {
 	// Status of the pod sandbox.
 	// Only for kuberuntime now, other runtime may keep it nil.
 	SandboxStatuses []*runtimeapi.PodSandboxStatus
+	// Timestamp at which container and pod statuses were recorded
+	TimeStamp time.Time
+}
+
+// ContainerResources represents the Resources allocated to the running container.
+type ContainerResources struct {
+	// CPU capacity reserved for the container
+	CPURequest *resource.Quantity
+	// CPU limit enforced on the container
+	CPULimit *resource.Quantity
+	// Memory capaacity reserved for the container
+	MemoryRequest *resource.Quantity
+	// Memory limit enforced on the container
+	MemoryLimit *resource.Quantity
 }
 
 // Status represents the status of a container.
@@ -328,8 +355,12 @@ type Status struct {
 	Image string
 	// ID of the image.
 	ImageID string
+	// Runtime handler used to pull the image if any.
+	ImageRuntimeHandler string
 	// Hash of the container, used for comparison.
 	Hash uint64
+	// Hash of the container over fields with Resources field zero'd out.
+	HashWithoutResources uint64
 	// Number of times that the container has been restarted.
 	RestartCount int
 	// A string explains why container is in such a status.
@@ -337,6 +368,8 @@ type Status struct {
 	// Message written by the container before exiting (stored in
 	// TerminationMessagePath).
 	Message string
+	// CPU and memory resources for this container
+	Resources *ContainerResources
 }
 
 // FindContainerStatusByName returns container status in the pod status with the given name.
@@ -429,6 +462,12 @@ type DeviceInfo struct {
 	Permissions string
 }
 
+// CDIDevice contains information about CDI device
+type CDIDevice struct {
+	// Name is a fully qualified device name
+	Name string
+}
+
 // RunContainerOptions specify the options which are necessary for running containers
 type RunContainerOptions struct {
 	// The environment variables list.
@@ -437,6 +476,8 @@ type RunContainerOptions struct {
 	Mounts []Mount
 	// The host devices mapped into the containers.
 	Devices []DeviceInfo
+	// The CDI devices for the container
+	CDIDevices []CDIDevice
 	// The annotations for the container
 	// These annotations are generated by other components (i.e.,
 	// not users). Currently, only device plugins populate the annotations.
@@ -449,12 +490,6 @@ type RunContainerOptions struct {
 	ReadOnly bool
 	// hostname for pod containers
 	Hostname string
-	// EnableHostUserNamespace sets userns=host when users request host namespaces (pid, ipc, net),
-	// are using non-namespaced capabilities (mknod, sys_time, sys_module), the pod contains a privileged container,
-	// or using host path volumes.
-	// This should only be enabled when the container runtime is performing user remapping AND if the
-	// experimental behavior is desired.
-	EnableHostUserNamespace bool
 }
 
 // VolumeInfo contains information about the volume.

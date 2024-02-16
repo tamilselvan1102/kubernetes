@@ -24,11 +24,19 @@ import (
 
 func traceFields(req *http.Request) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		attribute.String("url", req.URL.Path),
-		attribute.Stringer("user-agent", &lazyTruncatedUserAgent{req: req}),
+		attribute.Stringer("accept", &lazyAccept{req: req}),
 		attribute.Stringer("audit-id", &lazyAuditID{req: req}),
 		attribute.Stringer("client", &lazyClientIP{req: req}),
-		attribute.Stringer("accept", &lazyAccept{req: req}),
+		attribute.Stringer("api-group", &lazyAPIGroup{req: req}),
+		attribute.Stringer("api-version", &lazyAPIVersion{req: req}),
+		attribute.Stringer("name", &lazyName{req: req}),
+		attribute.Stringer("subresource", &lazySubresource{req: req}),
+		attribute.Stringer("namespace", &lazyNamespace{req: req}),
 		attribute.String("protocol", req.Proto),
+		attribute.Stringer("resource", &lazyResource{req: req}),
+		attribute.Stringer("scope", &lazyScope{req: req}),
+		attribute.String("url", req.URL.Path),
+		attribute.Stringer("user-agent", &lazyTruncatedUserAgent{req: req}),
+		attribute.Stringer("verb", &lazyVerb{req: req}),
 	}
 }

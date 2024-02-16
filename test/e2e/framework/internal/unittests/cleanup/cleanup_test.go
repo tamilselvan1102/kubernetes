@@ -22,12 +22,16 @@ limitations under the License.
 package cleanup
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"regexp"
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/ginkgo/v2/reporters"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/ktesting"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -43,15 +47,21 @@ import (
 //
 //
 //
-//
-//
-//
-//
 // This must be line #50.
+
+func init() {
+	framework.NewFrameworkExtensions = append(framework.NewFrameworkExtensions,
+		// This callback runs directly after NewDefaultFramework is done.
+		func(f *framework.Framework) {
+			ginkgo.BeforeEach(func() { framework.Logf("extension before") })
+			ginkgo.AfterEach(func() { framework.Logf("extension after") })
+		},
+	)
+}
 
 var _ = ginkgo.Describe("e2e", func() {
 	ginkgo.BeforeEach(func() {
-		framework.Logf("before")
+		logBeforeHelper()
 	})
 
 	f := framework.NewDefaultFramework("test-namespace")
@@ -77,7 +87,7 @@ var _ = ginkgo.Describe("e2e", func() {
 		framework.Logf("after #2")
 	})
 
-	ginkgo.It("works", func() {
+	ginkgo.It("works", func(ctx context.Context) {
 		// DeferCleanup invokes in first-in-last-out order
 		ginkgo.DeferCleanup(func() {
 			framework.Logf("cleanup last")
@@ -85,60 +95,72 @@ var _ = ginkgo.Describe("e2e", func() {
 		ginkgo.DeferCleanup(func() {
 			framework.Logf("cleanup first")
 		})
+
+		ginkgo.DeferCleanup(framework.IgnoreNotFound(f.ClientSet.CoreV1().PersistentVolumes().Delete), "simple", metav1.DeleteOptions{})
+		fail := func(ctx context.Context, name string) error {
+			return fmt.Errorf("fake error for %q", name)
+		}
+		ginkgo.DeferCleanup(framework.IgnoreNotFound(fail), "failure") // Without a failure the output would not be shown in JUnit.
+
+		// More test cases can be added here without affeccting line numbering
+		// of existing tests.
 	})
 })
 
-func init() {
-	framework.NewFrameworkExtensions = append(framework.NewFrameworkExtensions,
-		// This callback runs directly after NewDefaultFramework is done.
-		func(f *framework.Framework) {
-			ginkgo.BeforeEach(func() { framework.Logf("extension before") })
-			ginkgo.AfterEach(func() { framework.Logf("extension after") })
-		},
-	)
+// logBeforeHelper must be skipped when doing stack unwinding in the logging
+// implementation.
+func logBeforeHelper() {
+	ginkgo.GinkgoHelper()
+	framework.Logf("before")
 }
 
 const (
-	ginkgoOutput = `[BeforeEach] e2e
-  cleanup_test.go:53
-INFO: before
-[BeforeEach] e2e
-  set up framework | framework.go:xxx
-STEP: Creating a kubernetes client
-INFO: >>> kubeConfig: yyy/kube.config
-STEP: Building a namespace api object, basename test-namespace
-INFO: Skipping waiting for service account
-[BeforeEach] e2e
-  cleanup_test.go:95
-INFO: extension before
-[BeforeEach] e2e
-  cleanup_test.go:61
-INFO: before #1
-[BeforeEach] e2e
-  cleanup_test.go:65
-INFO: before #2
-[It] works
-  cleanup_test.go:80
-[AfterEach] e2e
-  cleanup_test.go:96
-INFO: extension after
-[AfterEach] e2e
-  cleanup_test.go:69
-INFO: after #1
-[AfterEach] e2e
-  cleanup_test.go:76
-INFO: after #2
-[DeferCleanup (Each)] e2e
-  cleanup_test.go:85
-INFO: cleanup first
-[DeferCleanup (Each)] e2e
-  cleanup_test.go:82
-INFO: cleanup last
-[DeferCleanup (Each)] e2e
-  dump namespaces | framework.go:xxx
-[DeferCleanup (Each)] e2e
-  tear down framework | framework.go:xxx
-STEP: Destroying namespace "test-namespace-zzz" for this suite.
+	ginkgoOutput = `> Enter [BeforeEach] e2e - cleanup_test.go:63 <time>
+<klog> cleanup_test.go:64] before
+< Exit [BeforeEach] e2e - cleanup_test.go:63 <time>
+> Enter [BeforeEach] e2e - set up framework | framework.go:xxx <time>
+STEP: Creating a kubernetes client - framework.go:xxx <time>
+<klog> util.go:xxx] >>> kubeConfig: yyy/kube.config
+STEP: Building a namespace api object, basename test-namespace - framework.go:xxx <time>
+<klog> framework.go:xxx] Skipping waiting for service account
+< Exit [BeforeEach] e2e - set up framework | framework.go:xxx <time>
+> Enter [BeforeEach] e2e - cleanup_test.go:56 <time>
+<klog> cleanup_test.go:56] extension before
+< Exit [BeforeEach] e2e - cleanup_test.go:56 <time>
+> Enter [BeforeEach] e2e - cleanup_test.go:71 <time>
+<klog> cleanup_test.go:72] before #1
+< Exit [BeforeEach] e2e - cleanup_test.go:71 <time>
+> Enter [BeforeEach] e2e - cleanup_test.go:75 <time>
+<klog> cleanup_test.go:76] before #2
+< Exit [BeforeEach] e2e - cleanup_test.go:75 <time>
+> Enter [It] works - cleanup_test.go:90 <time>
+< Exit [It] works - cleanup_test.go:90 <time>
+> Enter [AfterEach] e2e - cleanup_test.go:57 <time>
+<klog> cleanup_test.go:57] extension after
+< Exit [AfterEach] e2e - cleanup_test.go:57 <time>
+> Enter [AfterEach] e2e - cleanup_test.go:79 <time>
+<klog> cleanup_test.go:80] after #1
+< Exit [AfterEach] e2e - cleanup_test.go:79 <time>
+> Enter [AfterEach] e2e - cleanup_test.go:86 <time>
+<klog> cleanup_test.go:87] after #2
+< Exit [AfterEach] e2e - cleanup_test.go:86 <time>
+> Enter [DeferCleanup (Each)] e2e - cleanup_test.go:103 <time>
+[FAILED] DeferCleanup callback returned error: fake error for "failure"
+In [DeferCleanup (Each)] at: cleanup_test.go:103 <time>
+< Exit [DeferCleanup (Each)] e2e - cleanup_test.go:103 <time>
+> Enter [DeferCleanup (Each)] e2e - cleanup_test.go:99 <time>
+< Exit [DeferCleanup (Each)] e2e - cleanup_test.go:99 <time>
+> Enter [DeferCleanup (Each)] e2e - cleanup_test.go:95 <time>
+<klog> cleanup_test.go:96] cleanup first
+< Exit [DeferCleanup (Each)] e2e - cleanup_test.go:95 <time>
+> Enter [DeferCleanup (Each)] e2e - cleanup_test.go:92 <time>
+<klog> cleanup_test.go:93] cleanup last
+< Exit [DeferCleanup (Each)] e2e - cleanup_test.go:92 <time>
+> Enter [DeferCleanup (Each)] e2e - dump namespaces | framework.go:xxx <time>
+< Exit [DeferCleanup (Each)] e2e - dump namespaces | framework.go:xxx <time>
+> Enter [DeferCleanup (Each)] e2e - tear down framework | framework.go:xxx <time>
+STEP: Destroying namespace "test-namespace-zzz" for this suite. - framework.go:xxx <time>
+< Exit [DeferCleanup (Each)] e2e - tear down framework | framework.go:xxx <time>
 `
 )
 
@@ -182,11 +204,28 @@ func TestCleanup(t *testing.T) {
 	framework.AfterReadingAllFlags(&framework.TestContext)
 	suiteConfig, reporterConfig := framework.CreateGinkgoConfig()
 
-	expected := output.SuiteResults{
-		output.TestResult{
-			Name:            "e2e works",
-			NormalizeOutput: normalizeOutput,
-			Output:          ginkgoOutput,
+	expected := output.TestResult{
+		NormalizeOutput: normalizeOutput,
+		Suite: reporters.JUnitTestSuite{
+			Tests:    1,
+			Failures: 1,
+			Errors:   0,
+			Disabled: 0,
+			Skipped:  0,
+
+			TestCases: []reporters.JUnitTestCase{
+				{
+					Name:   "[It] e2e works",
+					Status: "failed",
+					Failure: &reporters.JUnitFailure{
+						Type: "failed",
+						Description: `[FAILED] DeferCleanup callback returned error: fake error for "failure"
+In [DeferCleanup (Each)] at: cleanup_test.go:103 <time>
+`,
+					},
+					SystemErr: ginkgoOutput,
+				},
+			},
 		},
 	}
 
@@ -196,7 +235,7 @@ func TestCleanup(t *testing.T) {
 func normalizeOutput(output string) string {
 	for exp, replacement := range map[string]string{
 		// Ignore line numbers inside framework source code (likely to change).
-		`framework\.go:\d+`: `framework.go:xxx`,
+		`(framework|util)\.go:\d+`: `$1.go:xxx`,
 		// Config file name varies for each run.
 		`kubeConfig: .*/kube.config`: `kubeConfig: yyy/kube.config`,
 		// Random suffix for namespace.

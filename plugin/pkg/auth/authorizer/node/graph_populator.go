@@ -44,30 +44,26 @@ func AddGraphEventHandlers(
 		graph: graph,
 	}
 
-	var hasSynced []cache.InformerSynced
-
-	pods.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	podHandler, _ := pods.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    g.addPod,
 		UpdateFunc: g.updatePod,
 		DeleteFunc: g.deletePod,
 	})
-	hasSynced = append(hasSynced, pods.Informer().HasSynced)
 
-	pvs.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	pvsHandler, _ := pvs.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    g.addPV,
 		UpdateFunc: g.updatePV,
 		DeleteFunc: g.deletePV,
 	})
-	hasSynced = append(hasSynced, pvs.Informer().HasSynced)
 
-	attachments.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	attachHandler, _ := attachments.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    g.addVolumeAttachment,
 		UpdateFunc: g.updateVolumeAttachment,
 		DeleteFunc: g.deleteVolumeAttachment,
 	})
-	hasSynced = append(hasSynced, attachments.Informer().HasSynced)
 
-	go cache.WaitForNamedCacheSync("node_authorizer", wait.NeverStop, hasSynced...)
+	go cache.WaitForNamedCacheSync("node_authorizer", wait.NeverStop,
+		podHandler.HasSynced, pvsHandler.HasSynced, attachHandler.HasSynced)
 }
 
 func (g *graphPopulator) addPod(obj interface{}) {
@@ -82,8 +78,9 @@ func (g *graphPopulator) updatePod(oldObj, obj interface{}) {
 		return
 	}
 	if oldPod, ok := oldObj.(*corev1.Pod); ok && oldPod != nil {
-		if (pod.Spec.NodeName == oldPod.Spec.NodeName) && (pod.UID == oldPod.UID) {
-			// Node and uid are unchanged, all object references in the pod spec are immutable
+		if (pod.Spec.NodeName == oldPod.Spec.NodeName) && (pod.UID == oldPod.UID) &&
+			resourceClaimStatusesEqual(oldPod.Status.ResourceClaimStatuses, pod.Status.ResourceClaimStatuses) {
+			// Node and uid are unchanged, all object references in the pod spec are immutable respectively unmodified (claim statuses).
 			klog.V(5).Infof("updatePod %s/%s, node unchanged", pod.Namespace, pod.Name)
 			return
 		}
@@ -93,6 +90,29 @@ func (g *graphPopulator) updatePod(oldObj, obj interface{}) {
 	startTime := time.Now()
 	g.graph.AddPod(pod)
 	klog.V(5).Infof("updatePod %s/%s for node %s completed in %v", pod.Namespace, pod.Name, pod.Spec.NodeName, time.Since(startTime))
+}
+
+func resourceClaimStatusesEqual(statusA, statusB []corev1.PodResourceClaimStatus) bool {
+	if len(statusA) != len(statusB) {
+		return false
+	}
+	// In most cases, status entries only get added once and not modified.
+	// But this cannot be guaranteed, so for the sake of correctness in all
+	// cases this code here has to check.
+	for i := range statusA {
+		if statusA[i].Name != statusB[i].Name {
+			return false
+		}
+		claimNameA := statusA[i].ResourceClaimName
+		claimNameB := statusB[i].ResourceClaimName
+		if (claimNameA == nil) != (claimNameB == nil) {
+			return false
+		}
+		if claimNameA != nil && *claimNameA != *claimNameB {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *graphPopulator) deletePod(obj interface{}) {

@@ -27,8 +27,10 @@ import (
 )
 
 type pullResult struct {
-	imageRef string
-	err      error
+	imageRef     string
+	imageSize    uint64
+	err          error
+	pullDuration time.Duration
 }
 
 type imagePuller interface {
@@ -39,18 +41,34 @@ var _, _ imagePuller = &parallelImagePuller{}, &serialImagePuller{}
 
 type parallelImagePuller struct {
 	imageService kubecontainer.ImageService
+	tokens       chan struct{}
 }
 
-func newParallelImagePuller(imageService kubecontainer.ImageService) imagePuller {
-	return &parallelImagePuller{imageService}
+func newParallelImagePuller(imageService kubecontainer.ImageService, maxParallelImagePulls *int32) imagePuller {
+	if maxParallelImagePulls == nil || *maxParallelImagePulls < 1 {
+		return &parallelImagePuller{imageService, nil}
+	}
+	return &parallelImagePuller{imageService, make(chan struct{}, *maxParallelImagePulls)}
 }
 
 func (pip *parallelImagePuller) pullImage(ctx context.Context, spec kubecontainer.ImageSpec, pullSecrets []v1.Secret, pullChan chan<- pullResult, podSandboxConfig *runtimeapi.PodSandboxConfig) {
 	go func() {
+		if pip.tokens != nil {
+			pip.tokens <- struct{}{}
+			defer func() { <-pip.tokens }()
+		}
+		startTime := time.Now()
 		imageRef, err := pip.imageService.PullImage(ctx, spec, pullSecrets, podSandboxConfig)
+		var size uint64
+		if err == nil && imageRef != "" {
+			// Getting the image size with best effort, ignoring the error.
+			size, _ = pip.imageService.GetImageSize(ctx, spec)
+		}
 		pullChan <- pullResult{
-			imageRef: imageRef,
-			err:      err,
+			imageRef:     imageRef,
+			imageSize:    size,
+			err:          err,
+			pullDuration: time.Since(startTime),
 		}
 	}()
 }
@@ -89,10 +107,19 @@ func (sip *serialImagePuller) pullImage(ctx context.Context, spec kubecontainer.
 
 func (sip *serialImagePuller) processImagePullRequests() {
 	for pullRequest := range sip.pullRequests {
+		startTime := time.Now()
 		imageRef, err := sip.imageService.PullImage(pullRequest.ctx, pullRequest.spec, pullRequest.pullSecrets, pullRequest.podSandboxConfig)
+		var size uint64
+		if err == nil && imageRef != "" {
+			// Getting the image size with best effort, ignoring the error.
+			size, _ = sip.imageService.GetImageSize(pullRequest.ctx, pullRequest.spec)
+		}
 		pullRequest.pullChan <- pullResult{
-			imageRef: imageRef,
-			err:      err,
+			imageRef:  imageRef,
+			imageSize: size,
+			err:       err,
+			// Note: pullDuration includes credential resolution and getting the image size.
+			pullDuration: time.Since(startTime),
 		}
 	}
 }

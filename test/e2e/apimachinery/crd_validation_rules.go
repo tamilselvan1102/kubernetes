@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
+
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -37,7 +39,7 @@ import (
 
 var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", func() {
 	f := framework.NewDefaultFramework("crd-validation-expressions")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	var apiExtensionClient *clientset.Clientset
 	ginkgo.BeforeEach(func() {
@@ -94,7 +96,7 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		  }
 	   }
 	}`))
-	ginkgo.It("MUST NOT fail validation for create of a custom resource that satisfies the x-kubernetes-validations rules", func() {
+	ginkgo.It("MUST NOT fail validation for create of a custom resource that satisfies the x-kubernetes-validations rules", func(ctx context.Context) {
 		ginkgo.By("Creating a custom resource definition with validation rules")
 		crd := fixtures.NewRandomNameV1CustomResourceDefinitionWithSchema(v1.NamespaceScoped, schemaWithValidationExpression, false)
 		crd, err := fixtures.CreateNewV1CustomResourceDefinitionWatchUnsafe(crd, apiExtensionClient)
@@ -107,7 +109,7 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		ginkgo.By("Creating a custom resource with values that are allowed by the validation rules set on the custom resource definition")
 		crClient, gvr := customResourceClient(crd)
 		name1 := names.SimpleNameGenerator.GenerateName("cr-1")
-		_, err = crClient.Namespace(f.Namespace.Name).Create(context.TODO(), &unstructured.Unstructured{Object: map[string]interface{}{
+		_, err = crClient.Namespace(f.Namespace.Name).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": gvr.Group + "/" + gvr.Version,
 			"kind":       crd.Spec.Names.Kind,
 			"metadata": map[string]interface{}{
@@ -124,7 +126,7 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		}}, metav1.CreateOptions{})
 		framework.ExpectNoError(err, "validation rules satisfied")
 	})
-	ginkgo.It("MUST fail validation for create of a custom resource that does not satisfy the x-kubernetes-validations rules", func() {
+	ginkgo.It("MUST fail validation for create of a custom resource that does not satisfy the x-kubernetes-validations rules", func(ctx context.Context) {
 		ginkgo.By("Creating a custom resource definition with validation rules")
 		crd := fixtures.NewRandomNameV1CustomResourceDefinitionWithSchema(v1.NamespaceScoped, schemaWithValidationExpression, false)
 		crd, err := fixtures.CreateNewV1CustomResourceDefinitionWatchUnsafe(crd, apiExtensionClient)
@@ -137,7 +139,7 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		ginkgo.By("Creating a custom resource with values that fail the validation rules set on the custom resource definition")
 		crClient, gvr := customResourceClient(crd)
 		name1 := names.SimpleNameGenerator.GenerateName("cr-1")
-		_, err = crClient.Namespace(f.Namespace.Name).Create(context.TODO(), &unstructured.Unstructured{Object: map[string]interface{}{
+		_, err = crClient.Namespace(f.Namespace.Name).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": gvr.Group + "/" + gvr.Version,
 			"kind":       crd.Spec.Names.Kind,
 			"metadata": map[string]interface{}{
@@ -149,14 +151,14 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 				"y": int64(0),
 			},
 		}}, metav1.CreateOptions{})
-		framework.ExpectError(err, "validation rules not satisfied")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "validation rules not satisfied")
 		expectedErrMsg := "failed rule"
 		if !strings.Contains(err.Error(), expectedErrMsg) {
 			framework.Failf("expect error contains %q, got %q", expectedErrMsg, err.Error())
 		}
 	})
 
-	ginkgo.It("MUST fail create of a custom resource definition that contains a x-kubernetes-validations rule that refers to a property that do not exist", func() {
+	ginkgo.It("MUST fail create of a custom resource definition that contains a x-kubernetes-validations rule that refers to a property that do not exist", func(ctx context.Context) {
 		ginkgo.By("Defining a custom resource definition with a validation rule that refers to a property that do not exist")
 		var schemaWithInvalidValidationRule = unmarshallSchema([]byte(`{
 		   "type":"object",
@@ -174,14 +176,14 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		}`))
 		crd := fixtures.NewRandomNameV1CustomResourceDefinitionWithSchema(v1.NamespaceScoped, schemaWithInvalidValidationRule, false)
 		_, err := fixtures.CreateNewV1CustomResourceDefinitionWatchUnsafe(crd, apiExtensionClient)
-		framework.ExpectError(err, "creating CustomResourceDefinition with a validation rule that refers to a property that do not exist")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "creating CustomResourceDefinition with a validation rule that refers to a property that do not exist")
 		expectedErrMsg := "undefined field 'z'"
 		if !strings.Contains(err.Error(), expectedErrMsg) {
 			framework.Failf("expect error contains %q, got %q", expectedErrMsg, err.Error())
 		}
 	})
 
-	ginkgo.It("MUST fail create of a custom resource definition that contains an x-kubernetes-validations rule that contains a syntax error", func() {
+	ginkgo.It("MUST fail create of a custom resource definition that contains an x-kubernetes-validations rule that contains a syntax error", func(ctx context.Context) {
 		ginkgo.By("Defining a custom resource definition that contains a validation rule with a syntax error")
 		var schemaWithSyntaxErrorRule = unmarshallSchema([]byte(`{
 		   "type":"object",
@@ -196,14 +198,14 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		}`))
 		crd := fixtures.NewRandomNameV1CustomResourceDefinitionWithSchema(v1.NamespaceScoped, schemaWithSyntaxErrorRule, false)
 		_, err := fixtures.CreateNewV1CustomResourceDefinitionWatchUnsafe(crd, apiExtensionClient)
-		framework.ExpectError(err, "creating a CustomResourceDefinition with a validation rule that contains a syntax error")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "creating a CustomResourceDefinition with a validation rule that contains a syntax error")
 		expectedErrMsg := "Syntax error"
 		if !strings.Contains(err.Error(), expectedErrMsg) {
 			framework.Failf("expected error message to contain %q, got %q", expectedErrMsg, err.Error())
 		}
 	})
 
-	ginkgo.It("MUST fail create of a custom resource definition that contains an x-kubernetes-validations rule that exceeds the estimated cost limit", func() {
+	ginkgo.It("MUST fail create of a custom resource definition that contains an x-kubernetes-validations rule that exceeds the estimated cost limit", func(ctx context.Context) {
 		ginkgo.By("Defining a custom resource definition that contains a validation rule that exceeds the cost limit")
 		var schemaWithExpensiveRule = unmarshallSchema([]byte(`{
 		   "type":"object",
@@ -229,14 +231,14 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		}`))
 		crd := fixtures.NewRandomNameV1CustomResourceDefinitionWithSchema(v1.NamespaceScoped, schemaWithExpensiveRule, false)
 		_, err := fixtures.CreateNewV1CustomResourceDefinitionWatchUnsafe(crd, apiExtensionClient)
-		framework.ExpectError(err, "creating a CustomResourceDefinition with a validation rule that exceeds the cost limit")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "creating a CustomResourceDefinition with a validation rule that exceeds the cost limit")
 		expectedErrMsg := "exceeds budget"
 		if !strings.Contains(err.Error(), expectedErrMsg) {
 			framework.Failf("expected error message to contain %q, got %q", expectedErrMsg, err.Error())
 		}
 	})
 
-	ginkgo.It("MUST fail create of a custom resource that exceeds the runtime cost limit for x-kubernetes-validations rule execution", func() {
+	ginkgo.It("MUST fail create of a custom resource that exceeds the runtime cost limit for x-kubernetes-validations rule execution", func(ctx context.Context) {
 		ginkgo.By("Defining a custom resource definition including an expensive rule on a large amount of data")
 		crd := fixtures.NewRandomNameV1CustomResourceDefinitionWithSchema(v1.NamespaceScoped, schemaWithValidationExpression, false)
 		_, err := fixtures.CreateNewV1CustomResourceDefinitionWatchUnsafe(crd, apiExtensionClient)
@@ -248,7 +250,7 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		ginkgo.By("Attempting to create a custom resource that will exceed the runtime cost limit")
 		crClient, gvr := customResourceClient(crd)
 		name1 := names.SimpleNameGenerator.GenerateName("cr-1")
-		_, err = crClient.Namespace(f.Namespace.Name).Create(context.TODO(), &unstructured.Unstructured{Object: map[string]interface{}{
+		_, err = crClient.Namespace(f.Namespace.Name).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": gvr.Group + "/" + gvr.Version,
 			"kind":       crd.Spec.Names.Kind,
 			"metadata": map[string]interface{}{
@@ -259,14 +261,14 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 				"largeArray": genLargeArray(725, 20),
 			},
 		}}, metav1.CreateOptions{})
-		framework.ExpectError(err, "custom resource creation should be prohibited by runtime cost limit")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "custom resource creation should be prohibited by runtime cost limit")
 		expectedErrMsg := "call cost exceeds limit"
 		if !strings.Contains(err.Error(), expectedErrMsg) {
 			framework.Failf("expect error contains %q, got %q", expectedErrMsg, err.Error())
 		}
 	})
 
-	ginkgo.It("MUST fail update of a custom resource that does not satisfy a x-kubernetes-validations transition rule", func() {
+	ginkgo.It("MUST fail update of a custom resource that does not satisfy a x-kubernetes-validations transition rule", func(ctx context.Context) {
 		ginkgo.By("Defining a custom resource definition with a x-kubernetes-validations transition rule")
 		var schemaWithTransitionRule = unmarshallSchema([]byte(`{
 		   "type":"object",
@@ -294,7 +296,7 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		ginkgo.By("Attempting to create a custom resource")
 		crClient, gvr := customResourceClient(crd)
 		name1 := names.SimpleNameGenerator.GenerateName("cr-1")
-		unstruct, err := crClient.Namespace(f.Namespace.Name).Create(context.TODO(), &unstructured.Unstructured{Object: map[string]interface{}{
+		unstruct, err := crClient.Namespace(f.Namespace.Name).Create(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": gvr.Group + "/" + gvr.Version,
 			"kind":       crd.Spec.Names.Kind,
 			"metadata": map[string]interface{}{
@@ -307,7 +309,7 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 		}}, metav1.CreateOptions{})
 		framework.ExpectNoError(err, "transition rules do not apply to create operations")
 		ginkgo.By("Updating a custom resource with a value that does not satisfy an x-kubernetes-validations transition rule")
-		_, err = crClient.Namespace(f.Namespace.Name).Update(context.TODO(), &unstructured.Unstructured{Object: map[string]interface{}{
+		_, err = crClient.Namespace(f.Namespace.Name).Update(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": gvr.Group + "/" + gvr.Version,
 			"kind":       crd.Spec.Names.Kind,
 			"metadata": map[string]interface{}{
@@ -319,7 +321,7 @@ var _ = SIGDescribe("CustomResourceValidationRules [Privileged:ClusterAdmin]", f
 				"num": int64(9),
 			},
 		}}, metav1.UpdateOptions{})
-		framework.ExpectError(err, "custom resource update should be prohibited by transition rule")
+		gomega.Expect(err).To(gomega.HaveOccurred(), "custom resource update should be prohibited by transition rule")
 		expectedErrMsg := "failed rule"
 		if !strings.Contains(err.Error(), expectedErrMsg) {
 			framework.Failf("expect error contains %q, got %q", expectedErrMsg, err.Error())

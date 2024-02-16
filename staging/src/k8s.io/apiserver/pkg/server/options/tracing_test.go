@@ -67,9 +67,9 @@ func TestValidateTracingOptions(t *testing.T) {
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			errs := tc.contents.Validate()
-			if tc.expectError == false && len(errs) != 0 {
+			if !tc.expectError && len(errs) != 0 {
 				t.Errorf("Calling Validate expected no error, got %v", errs)
-			} else if tc.expectError == true && len(errs) == 0 {
+			} else if tc.expectError && len(errs) == 0 {
 				t.Errorf("Calling Validate expected error, got no error")
 			}
 		})
@@ -144,7 +144,7 @@ spec:
         k8s-app: agent
     spec:
       containers:
-        - image: k8s.gcr.io/busybox
+        - image: registry.k8s.io/busybox
           name: agent
 `,
 			expectedResult: nil,

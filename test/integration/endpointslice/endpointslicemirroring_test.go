@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2/ktesting"
 	kubeapiservertesting "k8s.io/kubernetes/cmd/kube-apiserver/app/testing"
 	"k8s.io/kubernetes/pkg/controller/endpoint"
 	"k8s.io/kubernetes/pkg/controller/endpointslice"
@@ -47,6 +48,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 		t.Fatalf("Error creating clientset: %v", err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	resyncPeriod := 12 * time.Hour
 	informers := informers.NewSharedInformerFactory(client, resyncPeriod)
 
@@ -58,6 +60,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 		1*time.Second)
 
 	epsController := endpointslice.NewController(
+		ctx,
 		informers.Core().V1().Pods(),
 		informers.Core().V1().Services(),
 		informers.Core().V1().Nodes(),
@@ -67,6 +70,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 		1*time.Second)
 
 	epsmController := endpointslicemirroring.NewController(
+		ctx,
 		informers.Core().V1().Endpoints(),
 		informers.Discovery().V1().EndpointSlices(),
 		informers.Core().V1().Services(),
@@ -75,18 +79,17 @@ func TestEndpointSliceMirroring(t *testing.T) {
 		1*time.Second)
 
 	// Start informer and controllers
-	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	informers.Start(ctx.Done())
 	go epController.Run(ctx, 5)
-	go epsController.Run(5, ctx.Done())
-	go epsmController.Run(5, ctx.Done())
+	go epsController.Run(ctx, 5)
+	go epsmController.Run(ctx, 5)
 
 	testCases := []struct {
 		testName                     string
 		service                      *corev1.Service
 		customEndpoints              *corev1.Endpoints
-		expectEndpointSlice          bool
+		expectEndpointSlice          int
 		expectEndpointSliceManagedBy string
 	}{{
 		testName: "Service with selector",
@@ -103,7 +106,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 				},
 			},
 		},
-		expectEndpointSlice:          true,
+		expectEndpointSlice:          1,
 		expectEndpointSliceManagedBy: "endpointslice-controller.k8s.io",
 	}, {
 		testName: "Service without selector",
@@ -130,7 +133,85 @@ func TestEndpointSliceMirroring(t *testing.T) {
 				}},
 			}},
 		},
-		expectEndpointSlice:          true,
+		expectEndpointSlice:          1,
+		expectEndpointSliceManagedBy: "endpointslicemirroring-controller.k8s.io",
+	}, {
+		testName: "Service without selector Endpoint multiple subsets and same address",
+		service: &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-123",
+			},
+			Spec: corev1.ServiceSpec{
+				Ports: []corev1.ServicePort{{
+					Port: int32(80),
+				}},
+			},
+		},
+		customEndpoints: &corev1.Endpoints{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-123",
+			},
+			Subsets: []corev1.EndpointSubset{
+				{
+					Ports: []corev1.EndpointPort{{
+						Name: "port1",
+						Port: 80,
+					}},
+					Addresses: []corev1.EndpointAddress{{
+						IP: "10.0.0.1",
+					}},
+				},
+				{
+					Ports: []corev1.EndpointPort{{
+						Name: "port2",
+						Port: 90,
+					}},
+					Addresses: []corev1.EndpointAddress{{
+						IP: "10.0.0.1",
+					}},
+				},
+			},
+		},
+		expectEndpointSlice:          1,
+		expectEndpointSliceManagedBy: "endpointslicemirroring-controller.k8s.io",
+	}, {
+		testName: "Service without selector Endpoint multiple subsets",
+		service: &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-123",
+			},
+			Spec: corev1.ServiceSpec{
+				Ports: []corev1.ServicePort{{
+					Port: int32(80),
+				}},
+			},
+		},
+		customEndpoints: &corev1.Endpoints{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-123",
+			},
+			Subsets: []corev1.EndpointSubset{
+				{
+					Ports: []corev1.EndpointPort{{
+						Name: "port1",
+						Port: 80,
+					}},
+					Addresses: []corev1.EndpointAddress{{
+						IP: "10.0.0.1",
+					}},
+				},
+				{
+					Ports: []corev1.EndpointPort{{
+						Name: "port2",
+						Port: 90,
+					}},
+					Addresses: []corev1.EndpointAddress{{
+						IP: "10.0.0.2",
+					}},
+				},
+			},
+		},
+		expectEndpointSlice:          2,
 		expectEndpointSliceManagedBy: "endpointslicemirroring-controller.k8s.io",
 	}, {
 		testName: "Service without Endpoints",
@@ -148,7 +229,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 			},
 		},
 		customEndpoints:              nil,
-		expectEndpointSlice:          true,
+		expectEndpointSlice:          1,
 		expectEndpointSliceManagedBy: "endpointslice-controller.k8s.io",
 	}, {
 		testName: "Endpoints without Service",
@@ -166,7 +247,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 				}},
 			}},
 		},
-		expectEndpointSlice: false,
+		expectEndpointSlice: 0,
 	}}
 
 	for i, tc := range testCases {
@@ -201,13 +282,13 @@ func TestEndpointSliceMirroring(t *testing.T) {
 					return false, err
 				}
 
-				if tc.expectEndpointSlice {
-					if len(esList.Items) == 0 {
+				if tc.expectEndpointSlice > 0 {
+					if len(esList.Items) < tc.expectEndpointSlice {
 						t.Logf("Waiting for EndpointSlice to be created")
 						return false, nil
 					}
-					if len(esList.Items) > 1 {
-						return false, fmt.Errorf("Only expected 1 EndpointSlice, got %d", len(esList.Items))
+					if len(esList.Items) != tc.expectEndpointSlice {
+						return false, fmt.Errorf("Only expected %d EndpointSlice, got %d", tc.expectEndpointSlice, len(esList.Items))
 					}
 					endpointSlice := esList.Items[0]
 					if tc.expectEndpointSliceManagedBy != "" {
@@ -231,6 +312,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 }
 
 func TestEndpointSliceMirroringUpdates(t *testing.T) {
+	_, ctx := ktesting.NewTestContext(t)
 	// Disable ServiceAccount admission plugin as we don't have serviceaccount controller running.
 	server := kubeapiservertesting.StartTestServerOrDie(t, nil, []string{"--disable-admission-plugins=ServiceAccount"}, framework.SharedEtcd())
 	defer server.TearDownFn()
@@ -244,6 +326,7 @@ func TestEndpointSliceMirroringUpdates(t *testing.T) {
 	informers := informers.NewSharedInformerFactory(client, resyncPeriod)
 
 	epsmController := endpointslicemirroring.NewController(
+		ctx,
 		informers.Core().V1().Endpoints(),
 		informers.Discovery().V1().EndpointSlices(),
 		informers.Core().V1().Services(),
@@ -252,10 +335,10 @@ func TestEndpointSliceMirroringUpdates(t *testing.T) {
 		1*time.Second)
 
 	// Start informer and controllers
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	informers.Start(ctx.Done())
-	go epsmController.Run(1, ctx.Done())
+	go epsmController.Run(ctx, 1)
 
 	testCases := []struct {
 		testName      string
@@ -406,6 +489,7 @@ func TestEndpointSliceMirroringUpdates(t *testing.T) {
 }
 
 func TestEndpointSliceMirroringSelectorTransition(t *testing.T) {
+	_, ctx := ktesting.NewTestContext(t)
 	// Disable ServiceAccount admission plugin as we don't have serviceaccount controller running.
 	server := kubeapiservertesting.StartTestServerOrDie(t, nil, []string{"--disable-admission-plugins=ServiceAccount"}, framework.SharedEtcd())
 	defer server.TearDownFn()
@@ -419,6 +503,7 @@ func TestEndpointSliceMirroringSelectorTransition(t *testing.T) {
 	informers := informers.NewSharedInformerFactory(client, resyncPeriod)
 
 	epsmController := endpointslicemirroring.NewController(
+		ctx,
 		informers.Core().V1().Endpoints(),
 		informers.Discovery().V1().EndpointSlices(),
 		informers.Core().V1().Services(),
@@ -427,10 +512,10 @@ func TestEndpointSliceMirroringSelectorTransition(t *testing.T) {
 		1*time.Second)
 
 	// Start informer and controllers
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	informers.Start(stopCh)
-	go epsmController.Run(1, stopCh)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	informers.Start(ctx.Done())
+	go epsmController.Run(ctx, 1)
 
 	testCases := []struct {
 		testName               string

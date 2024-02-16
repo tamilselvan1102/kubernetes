@@ -89,6 +89,12 @@ type KubeSchedulerConfiguration struct {
 	// with the extender. These extenders are shared by all scheduler profiles.
 	// +listType=set
 	Extenders []Extender `json:"extenders,omitempty"`
+
+	// DelayCacheUntilActive specifies when to start caching. If this is true and leader election is enabled,
+	// the scheduler will wait to fill informer caches until it is the leader. Doing so will have slower
+	// failover with the benefit of lower memory overhead while waiting to become leader.
+	// Defaults to false.
+	DelayCacheUntilActive bool `json:"delayCacheUntilActive,omitempty"`
 }
 
 // DecodeNestedObjects decodes plugin args for known types.
@@ -170,6 +176,9 @@ type KubeSchedulerProfile struct {
 // Enabled plugins are called in the order specified here, after default plugins. If they need to
 // be invoked before default plugins, default plugins must be disabled and re-enabled here in desired order.
 type Plugins struct {
+	// PreEnqueue is a list of plugins that should be invoked before adding pods to the scheduling queue.
+	PreEnqueue PluginSet `json:"preEnqueue,omitempty"`
+
 	// QueueSort is a list of plugins that should be invoked when sorting pods in the scheduling queue.
 	QueueSort PluginSet `json:"queueSort,omitempty"`
 

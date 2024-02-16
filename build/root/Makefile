@@ -35,9 +35,13 @@ BASH_ENV := ./hack/lib/logging.sh
 
 # Define variables so `make --warn-undefined-variables` works.
 PRINT_HELP ?=
+WHAT ?=
+TESTS ?=
 
 # We don't need make's built-in rules.
 MAKEFLAGS += --no-builtin-rules
+# Be pedantic about undefined variables.
+MAKEFLAGS += --warn-undefined-variables
 .SUFFIXES:
 
 # Constants used throughout.
@@ -123,9 +127,12 @@ endef
 ifeq ($(PRINT_HELP),y)
 verify:
 	echo "$$VERIFY_HELP_INFO"
-else
+else ifeq ($(origin KUBE_VERIFY_GIT_BRANCH), undefined)
 verify:
 	KUBE_VERIFY_GIT_BRANCH=$(BRANCH) hack/make-rules/verify.sh
+else
+verify:
+	hack/make-rules/verify.sh
 endif
 
 define QUICK_VERIFY_HELP_INFO
@@ -193,6 +200,7 @@ define TEST_IT_HELP_INFO
 #
 # Example:
 #   make test-integration
+#   make test-integration WHAT=./test/integration/kubelet GOFLAGS="-v -coverpkg=./pkg/kubelet/..." KUBE_COVER="y"
 endef
 .PHONY: test-integration
 ifeq ($(PRINT_HELP),y)
@@ -212,7 +220,7 @@ define TEST_E2E_NODE_HELP_INFO
 #    Defaults to "\[Flaky\]|\[Slow\]|\[Serial\]".
 #  TEST_ARGS: A space-separated list of arguments to pass to node e2e test.
 #    Defaults to "".
-#  RUN_UNTIL_FAILURE: If true, pass --untilItFails to ginkgo so tests are run
+#  RUN_UNTIL_FAILURE: If true, pass --until-it-fails=true to ginkgo so tests are run
 #    repeatedly until they fail.  Defaults to false.
 #  REMOTE: If true, run the tests on a remote host.  Defaults to false.
 #  REMOTE_MODE: For REMOTE=true only.  Mode for remote execution (eg. gce, ssh).
@@ -227,7 +235,7 @@ define TEST_E2E_NODE_HELP_INFO
 #  CONTAINER_RUNTIME_ENDPOINT: remote container endpoint to connect to.
 #    Defaults to "/run/containerd/containerd.sock".
 #  IMAGE_SERVICE_ENDPOINT: remote image endpoint to connect to, to prepull images.
-#    Used when RUNTIME is set to "remote".
+#    Defaults to CONTAINER_RUNTIME_ENDPOINT.
 #  IMAGE_CONFIG_FILE: path to a file containing image configuration.
 #  IMAGE_CONFIG_DIR: path to image config files.
 #  SYSTEM_SPEC_NAME: The name of the system spec to be used for validating the
@@ -253,8 +261,11 @@ define TEST_E2E_NODE_HELP_INFO
 #  GUBERNATOR: For REMOTE=true only. Produce link to Gubernator to view logs.
 #    Defaults to false.
 #  TEST_SUITE: For REMOTE=true only. Test suite to use. Defaults to "default".
+#  SSH_USER: For REMOTE=true only  SSH username to use.
 #  SSH_KEY: For REMOTE=true only. Path to SSH key to use.
 #  SSH_OPTIONS: For REMOTE=true only. SSH options to use.
+#  INSTANCE_TYPE: For REMOTE=true only. Machine type to use.
+#  NODE_ENV: For REMOTE=true only. Additional metadata keys to add the instance.
 #  RUNTIME_CONFIG: The runtime configuration for the API server on the node e2e tests.
 #
 # Example:
@@ -306,16 +317,6 @@ clean:
 	build/make-clean.sh
 	hack/make-rules/clean.sh
 endif
-
-
-# TODO(thockin): Remove this in v1.29.
-.PHONY: generated_files
-generated_files:
-	echo "'make generated_files' is deprecated.  Please use hack/update-codegen.sh instead."
-ifneq ($(PRINT_HELP), y)
-	false
-endif
-
 
 define VET_HELP_INFO
 # Run 'go vet'.

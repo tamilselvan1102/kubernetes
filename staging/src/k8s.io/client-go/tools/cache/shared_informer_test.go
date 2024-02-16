@@ -26,6 +26,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,7 +55,7 @@ func newTestListener(name string, resyncPeriod time.Duration, expected ...string
 	return l
 }
 
-func (l *testListener) OnAdd(obj interface{}) {
+func (l *testListener) OnAdd(obj interface{}, isInInitialList bool) {
 	l.handle(obj)
 }
 
@@ -68,7 +71,6 @@ func (l *testListener) handle(obj interface{}) {
 	fmt.Printf("%s: handle: %v\n", l.name, key)
 	l.lock.Lock()
 	defer l.lock.Unlock()
-
 	objectMeta, _ := meta.Accessor(obj)
 	l.receivedItemNames = append(l.receivedItemNames, objectMeta.GetName())
 }
@@ -116,6 +118,81 @@ func isStarted(i SharedInformer) bool {
 func isRegistered(i SharedInformer, h ResourceEventHandlerRegistration) bool {
 	s := i.(*sharedIndexInformer)
 	return s.processor.getListener(h) != nil
+}
+
+func TestIndexer(t *testing.T) {
+	assert := assert.New(t)
+	// source simulates an apiserver object endpoint.
+	source := fcache.NewFakeControllerSource()
+	pod1 := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Labels: map[string]string{"a": "a-val", "b": "b-val1"}}}
+	pod2 := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Labels: map[string]string{"b": "b-val2"}}}
+	pod3 := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod3", Labels: map[string]string{"a": "a-val2"}}}
+	source.Add(pod1)
+	source.Add(pod2)
+
+	// create the shared informer and resync every 1s
+	informer := NewSharedInformer(source, &v1.Pod{}, 1*time.Second).(*sharedIndexInformer)
+	err := informer.AddIndexers(map[string]IndexFunc{
+		"labels": func(obj interface{}) ([]string, error) {
+			res := []string{}
+			for k := range obj.(*v1.Pod).Labels {
+				res = append(res, k)
+			}
+			return res, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+
+	go informer.Run(stop)
+	WaitForCacheSync(stop, informer.HasSynced)
+
+	cmpOps := cmpopts.SortSlices(func(a, b any) bool {
+		return a.(*v1.Pod).Name < b.(*v1.Pod).Name
+	})
+
+	// We should be able to lookup by index
+	res, err := informer.GetIndexer().ByIndex("labels", "a")
+	assert.NoError(err)
+	if diff := cmp.Diff([]any{pod1}, res); diff != "" {
+		t.Fatal(diff)
+	}
+
+	// Adding an item later is fine as well
+	source.Add(pod3)
+	// Event is async, need to poll
+	assert.Eventually(func() bool {
+		res, _ := informer.GetIndexer().ByIndex("labels", "a")
+		return cmp.Diff([]any{pod1, pod3}, res, cmpOps) == ""
+	}, time.Second*3, time.Millisecond)
+
+	// Adding an index later is also fine
+	err = informer.AddIndexers(map[string]IndexFunc{
+		"labels-again": func(obj interface{}) ([]string, error) {
+			res := []string{}
+			for k := range obj.(*v1.Pod).Labels {
+				res = append(res, k)
+			}
+			return res, nil
+		},
+	})
+	assert.NoError(err)
+
+	// Should be immediately available
+	res, err = informer.GetIndexer().ByIndex("labels-again", "a")
+	assert.NoError(err)
+	if diff := cmp.Diff([]any{pod1, pod3}, res, cmpOps); diff != "" {
+		t.Fatal(diff)
+	}
+	if got := informer.GetIndexer().ListIndexFuncValues("labels"); !sets.New(got...).Equal(sets.New("a", "b")) {
+		t.Fatalf("got %v", got)
+	}
+	if got := informer.GetIndexer().ListIndexFuncValues("labels-again"); !sets.New(got...).Equal(sets.New("a", "b")) {
+		t.Fatalf("got %v", got)
+	}
 }
 
 func TestListenerResyncPeriods(t *testing.T) {
@@ -349,6 +426,18 @@ func TestSharedInformerWatchDisruption(t *testing.T) {
 	// Simulate a connection loss (or even just a too-old-watch)
 	source.ResetWatch()
 
+	// Wait long enough for the reflector to exit and the backoff function to start waiting
+	// on the fake clock, otherwise advancing the fake clock will have no effect.
+	// TODO: Make this deterministic by counting the number of waiters on FakeClock
+	time.Sleep(10 * time.Millisecond)
+
+	// Advance the clock to cause the backoff wait to expire.
+	clock.Step(1601 * time.Millisecond)
+
+	// Wait long enough for backoff to invoke ListWatch a second time and distribute events
+	// to listeners.
+	time.Sleep(10 * time.Millisecond)
+
 	for _, listener := range listeners {
 		if !listener.ok() {
 			t.Errorf("%s: expected %v, got %v", listener.name, listener.expectedItemNames, listener.receivedItemNames)
@@ -382,6 +471,33 @@ func TestSharedInformerErrorHandling(t *testing.T) {
 	close(stop)
 }
 
+// TestSharedInformerStartRace is a regression test to ensure there is no race between
+// Run and SetWatchErrorHandler, and Run and SetTransform.
+func TestSharedInformerStartRace(t *testing.T) {
+	source := fcache.NewFakeControllerSource()
+	informer := NewSharedInformer(source, &v1.Pod{}, 1*time.Second).(*sharedIndexInformer)
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// Set dummy functions, just to test for race
+			informer.SetTransform(func(i interface{}) (interface{}, error) {
+				return i, nil
+			})
+			informer.SetWatchErrorHandler(func(r *Reflector, err error) {
+			})
+		}
+	}()
+
+	go informer.Run(stop)
+
+	close(stop)
+}
+
 func TestSharedInformerTransformer(t *testing.T) {
 	// source simulates an apiserver object endpoint.
 	source := fcache.NewFakeControllerSource()
@@ -395,9 +511,8 @@ func TestSharedInformerTransformer(t *testing.T) {
 			name := pod.GetName()
 
 			if upper := strings.ToUpper(name); upper != name {
-				copied := pod.DeepCopyObject().(*v1.Pod)
-				copied.SetName(upper)
-				return copied, nil
+				pod.SetName(upper)
+				return pod, nil
 			}
 		}
 		return obj, nil
@@ -649,8 +764,8 @@ func TestSharedInformerHandlerAbuse(t *testing.T) {
 	worker := func() {
 		// Keep adding and removing handler
 		// Make sure no duplicate events?
-		funcs := ResourceEventHandlerFuncs{
-			AddFunc:    func(obj interface{}) {},
+		funcs := ResourceEventHandlerDetailedFuncs{
+			AddFunc:    func(obj interface{}, isInInitialList bool) {},
 			UpdateFunc: func(oldObj, newObj interface{}) {},
 			DeleteFunc: func(obj interface{}) {},
 		}
@@ -902,8 +1017,12 @@ func TestAddWhileActive(t *testing.T) {
 	// create the shared informer and resync every 12 hours
 	informer := NewSharedInformer(source, &v1.Pod{}, 0).(*sharedIndexInformer)
 	listener1 := newTestListener("originalListener", 0, "pod1")
-	listener2 := newTestListener("originalListener", 0, "pod1", "pod2")
+	listener2 := newTestListener("listener2", 0, "pod1", "pod2")
 	handle1, _ := informer.AddEventHandler(listener1)
+
+	if handle1.HasSynced() {
+		t.Error("Synced before Run??")
+	}
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -916,12 +1035,26 @@ func TestAddWhileActive(t *testing.T) {
 		return
 	}
 
+	if !handle1.HasSynced() {
+		t.Error("Not synced after Run??")
+	}
+
+	listener2.lock.Lock() // ensure we observe it before it has synced
 	handle2, _ := informer.AddEventHandler(listener2)
+	if handle2.HasSynced() {
+		t.Error("Synced before processing anything?")
+	}
+	listener2.lock.Unlock() // permit it to proceed and sync
+
 	source.Add(&v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2"}})
 
 	if !listener2.ok() {
 		t.Errorf("event on listener2 did not occur")
 		return
+	}
+
+	if !handle2.HasSynced() {
+		t.Error("Not synced even after processing?")
 	}
 
 	if !isRegistered(informer, handle1) {

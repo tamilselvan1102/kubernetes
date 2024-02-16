@@ -19,7 +19,6 @@ package testing
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -35,8 +34,16 @@ import (
 	"k8s.io/apiserver/pkg/storage/storagebackend"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
+	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/klog/v2"
 )
+
+func init() {
+	// If instantiated more than once or together with other servers, the
+	// servers would try to modify the global logging state. This must get
+	// ignored during testing.
+	logsapi.ReapplyHandling = logsapi.ReapplyHandlingIgnoreUnchanged
+}
 
 // TearDownFunc is to be called to tear down a test server.
 type TearDownFunc func()
@@ -70,9 +77,8 @@ func NewDefaultTestServerOptions() *TestServerInstanceOptions {
 // and location of the tmpdir are returned.
 //
 // Note: we return a tear-down func instead of a stop channel because the later will leak temporary
-//
-//	files that because Golang testing's call to os.Exit will not give a stop channel go routine
-//	enough time to remove temporary files.
+// files that because Golang testing's call to os.Exit will not give a stop channel go routine
+// enough time to remove temporary files.
 func StartTestServer(t Logger, _ *TestServerInstanceOptions, customFlags []string, storageConfig *storagebackend.Config) (result TestServer, err error) {
 	stopCh := make(chan struct{})
 	var errCh chan error
@@ -101,7 +107,7 @@ func StartTestServer(t Logger, _ *TestServerInstanceOptions, customFlags []strin
 		}
 	}()
 
-	result.TmpDir, err = ioutil.TempDir("", "apiextensions-apiserver")
+	result.TmpDir, err = os.MkdirTemp("", "apiextensions-apiserver")
 	if err != nil {
 		return result, fmt.Errorf("failed to create temp dir: %v", err)
 	}

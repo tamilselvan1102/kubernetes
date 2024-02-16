@@ -25,6 +25,7 @@ import (
 	ptypes "github.com/gogo/protobuf/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/google/cadvisor/container/containerd/containers"
 	"github.com/google/cadvisor/container/containerd/errdefs"
@@ -58,6 +59,7 @@ const (
 	maxBackoffDelay   = 3 * time.Second
 	baseBackoffDelay  = 100 * time.Millisecond
 	connectionTimeout = 2 * time.Second
+	maxMsgSize        = 16 * 1024 * 1024 // 16MB
 )
 
 // Client creates a containerd client
@@ -77,10 +79,11 @@ func Client(address, namespace string) (ContainerdClient, error) {
 		connParams.Backoff.BaseDelay = baseBackoffDelay
 		connParams.Backoff.MaxDelay = maxBackoffDelay
 		gopts := []grpc.DialOption{
-			grpc.WithInsecure(),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithContextDialer(dialer.ContextDialer),
 			grpc.WithBlock(),
 			grpc.WithConnectParams(connParams),
+			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsgSize)),
 		}
 		unary, stream := newNSInterceptors(namespace)
 		gopts = append(gopts,

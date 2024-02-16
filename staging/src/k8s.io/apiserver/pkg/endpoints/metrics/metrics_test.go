@@ -17,11 +17,14 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 
+	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/endpoints/responsewriter"
 	"k8s.io/component-base/metrics/legacyregistry"
@@ -34,6 +37,7 @@ func TestCleanVerb(t *testing.T) {
 		initialVerb   string
 		suggestedVerb string
 		request       *http.Request
+		requestInfo   *request.RequestInfo
 		expectedVerb  string
 	}{
 		{
@@ -142,6 +146,89 @@ func TestCleanVerb(t *testing.T) {
 			request:      nil,
 			expectedVerb: "other",
 		},
+		{
+			desc:        "Pod logs should be transformed to CONNECT",
+			initialVerb: "GET",
+			request: &http.Request{
+				Method: "GET",
+				URL: &url.URL{
+					RawQuery: "/api/v1/namespaces/default/pods/test-pod/log",
+				},
+			},
+			requestInfo: &request.RequestInfo{
+				Verb:              "GET",
+				Resource:          "pods",
+				IsResourceRequest: true,
+				Subresource:       "log",
+			},
+			expectedVerb: "CONNECT",
+		},
+		{
+			desc:        "Pod exec should be transformed to CONNECT",
+			initialVerb: "POST",
+			request: &http.Request{
+				Method: "POST",
+				URL: &url.URL{
+					RawQuery: "/api/v1/namespaces/default/pods/test-pod/exec?command=sh",
+				},
+				Header: map[string][]string{
+					"Connection": {"Upgrade"},
+					"Upgrade":    {"SPDY/3.1"},
+					"X-Stream-Protocol-Version": {
+						"v4.channel.k8s.io", "v3.channel.k8s.io", "v2.channel.k8s.io", "channel.k8s.io",
+					},
+				},
+			},
+			requestInfo: &request.RequestInfo{
+				Verb:              "POST",
+				Resource:          "pods",
+				IsResourceRequest: true,
+				Subresource:       "exec",
+			},
+			expectedVerb: "CONNECT",
+		},
+		{
+			desc:        "Pod portforward should be transformed to CONNECT",
+			initialVerb: "POST",
+			request: &http.Request{
+				Method: "POST",
+				URL: &url.URL{
+					RawQuery: "/api/v1/namespaces/default/pods/test-pod/portforward",
+				},
+				Header: map[string][]string{
+					"Connection": {"Upgrade"},
+					"Upgrade":    {"SPDY/3.1"},
+					"X-Stream-Protocol-Version": {
+						"v4.channel.k8s.io", "v3.channel.k8s.io", "v2.channel.k8s.io", "channel.k8s.io",
+					},
+				},
+			},
+			requestInfo: &request.RequestInfo{
+				Verb:              "POST",
+				Resource:          "pods",
+				IsResourceRequest: true,
+				Subresource:       "portforward",
+			},
+			expectedVerb: "CONNECT",
+		},
+		{
+			desc:        "Deployment scale should not be transformed to CONNECT",
+			initialVerb: "PUT",
+			request: &http.Request{
+				Method: "PUT",
+				URL: &url.URL{
+					RawQuery: "/apis/apps/v1/namespaces/default/deployments/test-1/scale",
+				},
+				Header: map[string][]string{},
+			},
+			requestInfo: &request.RequestInfo{
+				Verb:              "PUT",
+				Resource:          "deployments",
+				IsResourceRequest: true,
+				Subresource:       "scale",
+			},
+			expectedVerb: "PUT",
+		},
 	}
 	for _, tt := range testCases {
 		t.Run(tt.initialVerb, func(t *testing.T) {
@@ -149,7 +236,7 @@ func TestCleanVerb(t *testing.T) {
 			if tt.request != nil {
 				req = tt.request
 			}
-			cleansedVerb := cleanVerb(tt.initialVerb, tt.suggestedVerb, req)
+			cleansedVerb := cleanVerb(tt.initialVerb, tt.suggestedVerb, req, tt.requestInfo)
 			if cleansedVerb != tt.expectedVerb {
 				t.Errorf("Got %s, but expected %s", cleansedVerb, tt.expectedVerb)
 			}
@@ -379,6 +466,64 @@ func TestRecordDroppedRequests(t *testing.T) {
 				t.Fatal(err)
 			}
 
+		})
+	}
+}
+
+func TestCleanListScope(t *testing.T) {
+	scenarios := []struct {
+		name          string
+		ctx           context.Context
+		opts          *metainternalversion.ListOptions
+		expectedScope string
+	}{
+		{
+			name: "empty scope",
+		},
+		{
+			name: "empty scope with empty request info",
+			ctx:  request.WithRequestInfo(context.TODO(), &request.RequestInfo{}),
+		},
+		{
+			name:          "namespace from ctx",
+			ctx:           request.WithNamespace(context.TODO(), "foo"),
+			expectedScope: "namespace",
+		},
+		{
+			name: "namespace from field selector",
+			opts: &metainternalversion.ListOptions{
+				FieldSelector: fields.ParseSelectorOrDie("metadata.namespace=foo"),
+			},
+			expectedScope: "namespace",
+		},
+		{
+			name:          "name from request info",
+			ctx:           request.WithRequestInfo(context.TODO(), &request.RequestInfo{Name: "bar"}),
+			expectedScope: "resource",
+		},
+		{
+			name: "name from field selector",
+			opts: &metainternalversion.ListOptions{
+				FieldSelector: fields.ParseSelectorOrDie("metadata.name=bar"),
+			},
+			expectedScope: "resource",
+		},
+		{
+			name:          "cluster scope request",
+			ctx:           request.WithRequestInfo(context.TODO(), &request.RequestInfo{IsResourceRequest: true}),
+			expectedScope: "cluster",
+		},
+	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			if scenario.ctx == nil {
+				scenario.ctx = context.TODO()
+			}
+			actualScope := CleanListScope(scenario.ctx, scenario.opts)
+			if actualScope != scenario.expectedScope {
+				t.Errorf("unexpected scope = %s, expected = %s", actualScope, scenario.expectedScope)
+			}
 		})
 	}
 }

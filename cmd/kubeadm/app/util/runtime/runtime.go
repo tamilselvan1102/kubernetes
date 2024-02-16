@@ -43,7 +43,9 @@ type ContainerRuntime interface {
 	ListKubeContainers() ([]string, error)
 	RemoveContainers(containers []string) error
 	PullImage(image string) error
+	PullImagesInParallel(images []string, ifNotPresent bool) error
 	ImageExists(image string) (bool, error)
+	SandboxImage() (string, error)
 }
 
 // CRIRuntime is a struct that interfaces with the CRI
@@ -70,7 +72,7 @@ func (runtime *CRIRuntime) Socket() string {
 
 // crictl creates a crictl command for the provided args.
 func (runtime *CRIRuntime) crictl(args ...string) utilsexec.Cmd {
-	cmd := runtime.exec.Command(runtime.crictlPath, append([]string{"-r", runtime.Socket()}, args...)...)
+	cmd := runtime.exec.Command(runtime.crictlPath, append([]string{"-r", runtime.Socket(), "-i", runtime.Socket()}, args...)...)
 	cmd.SetEnv(os.Environ())
 	return cmd
 }
@@ -138,6 +140,53 @@ func (runtime *CRIRuntime) PullImage(image string) error {
 	return errors.Wrapf(err, "output: %s, error", out)
 }
 
+// PullImagesInParallel pulls a list of images in parallel
+func (runtime *CRIRuntime) PullImagesInParallel(images []string, ifNotPresent bool) error {
+	errs := pullImagesInParallelImpl(images, ifNotPresent, runtime.ImageExists, runtime.PullImage)
+	return errorsutil.NewAggregate(errs)
+}
+
+func pullImagesInParallelImpl(images []string, ifNotPresent bool,
+	imageExistsFunc func(string) (bool, error), pullImageFunc func(string) error) []error {
+
+	var errs []error
+	errChan := make(chan error, len(images))
+
+	klog.V(1).Info("pulling all images in parallel")
+	for _, img := range images {
+		image := img
+		go func() {
+			if ifNotPresent {
+				exists, err := imageExistsFunc(image)
+				if err != nil {
+					errChan <- errors.WithMessagef(err, "failed to check if image %s exists", image)
+					return
+				}
+				if exists {
+					klog.V(1).Infof("image exists: %s", image)
+					errChan <- nil
+					return
+				}
+			}
+			err := pullImageFunc(image)
+			if err != nil {
+				err = errors.WithMessagef(err, "failed to pull image %s", image)
+			} else {
+				klog.V(1).Infof("done pulling: %s", image)
+			}
+			errChan <- err
+		}()
+	}
+
+	for i := 0; i < len(images); i++ {
+		if err := <-errChan; err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errs
+}
+
 // ImageExists checks to see if the image exists on the system
 func (runtime *CRIRuntime) ImageExists(image string) (bool, error) {
 	err := runtime.crictl("inspecti", image).Run()
@@ -172,4 +221,20 @@ func detectCRISocketImpl(isSocket func(string) bool, knownCRISockets []string) (
 // DetectCRISocket uses a list of known CRI sockets to detect one. If more than one or none is discovered, an error is returned.
 func DetectCRISocket() (string, error) {
 	return detectCRISocketImpl(isExistingSocket, defaultKnownCRISockets)
+}
+
+// SandboxImage returns the sandbox image used by the container runtime
+func (runtime *CRIRuntime) SandboxImage() (string, error) {
+	args := []string{"-D=false", "info", "-o", "go-template", "--template", "{{.config.sandboxImage}}"}
+	out, err := runtime.crictl(args...).CombinedOutput()
+	if err != nil {
+		return "", errors.Wrapf(err, "output: %s, error", string(out))
+	}
+
+	sandboxImage := strings.TrimSpace(string(out))
+	if len(sandboxImage) > 0 {
+		return sandboxImage, nil
+	}
+
+	return "", errors.Errorf("the detected sandbox image is empty")
 }

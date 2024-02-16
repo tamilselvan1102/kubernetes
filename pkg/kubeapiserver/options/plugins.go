@@ -20,11 +20,13 @@ package options
 // This should probably be part of some configuration fed into the build for a
 // given binary target.
 import (
+	validatingadmissionpolicy "k8s.io/apiserver/pkg/admission/plugin/policy/validating"
 	// Admission policies
 	"k8s.io/kubernetes/plugin/pkg/admission/admit"
 	"k8s.io/kubernetes/plugin/pkg/admission/alwayspullimages"
 	"k8s.io/kubernetes/plugin/pkg/admission/antiaffinity"
 	certapproval "k8s.io/kubernetes/plugin/pkg/admission/certificates/approval"
+	"k8s.io/kubernetes/plugin/pkg/admission/certificates/ctbattest"
 	certsigning "k8s.io/kubernetes/plugin/pkg/admission/certificates/signing"
 	certsubjectrestriction "k8s.io/kubernetes/plugin/pkg/admission/certificates/subjectrestriction"
 	"k8s.io/kubernetes/plugin/pkg/admission/defaulttolerationseconds"
@@ -45,7 +47,6 @@ import (
 	podpriority "k8s.io/kubernetes/plugin/pkg/admission/priority"
 	"k8s.io/kubernetes/plugin/pkg/admission/runtimeclass"
 	"k8s.io/kubernetes/plugin/pkg/admission/security/podsecurity"
-	"k8s.io/kubernetes/plugin/pkg/admission/securitycontext/scdeny"
 	"k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 	"k8s.io/kubernetes/plugin/pkg/admission/storage/persistentvolume/label"
 	"k8s.io/kubernetes/plugin/pkg/admission/storage/persistentvolume/resize"
@@ -66,7 +67,6 @@ var AllOrderedPlugins = []string{
 	autoprovision.PluginName,                // NamespaceAutoProvision
 	lifecycle.PluginName,                    // NamespaceLifecycle
 	exists.PluginName,                       // NamespaceExists
-	scdeny.PluginName,                       // SecurityContextDeny
 	antiaffinity.PluginName,                 // LimitPodHardAntiAffinityTopology
 	limitranger.PluginName,                  // LimitRanger
 	serviceaccount.PluginName,               // ServiceAccount
@@ -89,6 +89,7 @@ var AllOrderedPlugins = []string{
 	runtimeclass.PluginName,                 // RuntimeClass
 	certapproval.PluginName,                 // CertificateApproval
 	certsigning.PluginName,                  // CertificateSigning
+	ctbattest.PluginName,                    // ClusterTrustBundleAttest
 	certsubjectrestriction.PluginName,       // CertificateSubjectRestriction
 	defaultingressclass.PluginName,          // DefaultIngressClass
 	denyserviceexternalips.PluginName,       // DenyServiceExternalIPs
@@ -96,10 +97,11 @@ var AllOrderedPlugins = []string{
 	// new admission plugins should generally be inserted above here
 	// webhook, resourcequota, and deny plugins must go at the end
 
-	mutatingwebhook.PluginName,   // MutatingAdmissionWebhook
-	validatingwebhook.PluginName, // ValidatingAdmissionWebhook
-	resourcequota.PluginName,     // ResourceQuota
-	deny.PluginName,              // AlwaysDeny
+	mutatingwebhook.PluginName,           // MutatingAdmissionWebhook
+	validatingadmissionpolicy.PluginName, // ValidatingAdmissionPolicy
+	validatingwebhook.PluginName,         // ValidatingAdmissionWebhook
+	resourcequota.PluginName,             // ResourceQuota
+	deny.PluginName,                      // AlwaysDeny
 }
 
 // RegisterAllAdmissionPlugins registers all admission plugins.
@@ -128,13 +130,13 @@ func RegisterAllAdmissionPlugins(plugins *admission.Plugins) {
 	resourcequota.Register(plugins)
 	podsecurity.Register(plugins)
 	podpriority.Register(plugins)
-	scdeny.Register(plugins)
 	serviceaccount.Register(plugins)
 	setdefault.Register(plugins)
 	resize.Register(plugins)
 	storageobjectinuseprotection.Register(plugins)
 	certapproval.Register(plugins)
 	certsigning.Register(plugins)
+	ctbattest.Register(plugins)
 	certsubjectrestriction.Register(plugins)
 }
 
@@ -156,9 +158,11 @@ func DefaultOffAdmissionPlugins() sets.String {
 		runtimeclass.PluginName,                 // RuntimeClass
 		certapproval.PluginName,                 // CertificateApproval
 		certsigning.PluginName,                  // CertificateSigning
+		ctbattest.PluginName,                    // ClusterTrustBundleAttest
 		certsubjectrestriction.PluginName,       // CertificateSubjectRestriction
 		defaultingressclass.PluginName,          // DefaultIngressClass
 		podsecurity.PluginName,                  // PodSecurity
+		validatingadmissionpolicy.PluginName,    // ValidatingAdmissionPolicy, only active when feature gate ValidatingAdmissionPolicy is enabled
 	)
 
 	return sets.NewString(AllOrderedPlugins...).Difference(defaultOnPlugins)

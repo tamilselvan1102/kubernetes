@@ -58,6 +58,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
 	"k8s.io/apimachinery/pkg/runtime/serializer/versioning"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilwaitgroup "k8s.io/apimachinery/pkg/util/waitgroup"
@@ -65,23 +66,19 @@ import (
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/endpoints/handlers"
-	"k8s.io/apiserver/pkg/endpoints/handlers/fieldmanager"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	"k8s.io/apiserver/pkg/endpoints/metrics"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericfilters "k8s.io/apiserver/pkg/server/filters"
-	utilopenapi "k8s.io/apiserver/pkg/util/openapi"
 	"k8s.io/apiserver/pkg/util/webhook"
 	"k8s.io/apiserver/pkg/warning"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/scale/scheme/autoscalingv1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	"k8s.io/kube-openapi/pkg/util/proto"
+	"k8s.io/kube-openapi/pkg/spec3"
 	"k8s.io/kube-openapi/pkg/validation/spec"
-	"k8s.io/kube-openapi/pkg/validation/strfmt"
-	"k8s.io/kube-openapi/pkg/validation/validate"
 )
 
 // crdHandler serves the `/apis` endpoint.
@@ -123,7 +120,7 @@ type crdHandler struct {
 	// staticOpenAPISpec is used as a base for the schema of CR's for the
 	// purpose of managing fields, it is how CR handlers get the structure
 	// of TypeMeta and ObjectMeta
-	staticOpenAPISpec *spec.Swagger
+	staticOpenAPISpec map[string]*spec.Schema
 
 	// The limit on the request size that would be accepted and decoded in a write request
 	// 0 means no limit.
@@ -178,7 +175,7 @@ func NewCustomResourceDefinitionHandler(
 	authorizer authorizer.Authorizer,
 	requestTimeout time.Duration,
 	minRequestTimeout time.Duration,
-	staticOpenAPISpec *spec.Swagger,
+	staticOpenAPISpec map[string]*spec.Schema,
 	maxRequestBodyBytes int64) (*crdHandler, error) {
 	ret := &crdHandler{
 		versionDiscoveryHandler: versionDiscoveryHandler,
@@ -682,9 +679,9 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 		openAPIModels = nil
 	}
 
-	var typeConverter fieldmanager.TypeConverter = fieldmanager.DeducedTypeConverter{}
-	if openAPIModels != nil {
-		typeConverter, err = fieldmanager.NewTypeConverter(openAPIModels, crd.Spec.PreserveUnknownFields)
+	var typeConverter managedfields.TypeConverter = managedfields.NewDeducedTypeConverter()
+	if len(openAPIModels) > 0 {
+		typeConverter, err = managedfields.NewTypeConverter(openAPIModels, crd.Spec.PreserveUnknownFields)
 		if err != nil {
 			return nil, err
 		}
@@ -696,7 +693,7 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 	}
 
 	// Create replicasPathInCustomResource
-	replicasPathInCustomResource := fieldmanager.ResourcePathMappings{}
+	replicasPathInCustomResource := managedfields.ResourcePathMappings{}
 	for _, v := range crd.Spec.Versions {
 		subresources, err := apiextensionshelpers.GetSubresourcesForVersion(crd, v.Name)
 		if err != nil {
@@ -728,7 +725,20 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 		parameterCodec := runtime.NewParameterCodec(parameterScheme)
 
 		resource := schema.GroupVersionResource{Group: crd.Spec.Group, Version: v.Name, Resource: crd.Status.AcceptedNames.Plural}
+		if len(resource.Resource) == 0 {
+			utilruntime.HandleError(fmt.Errorf("CustomResourceDefinition %s has unexpected empty status.acceptedNames.plural", crd.Name))
+			return nil, fmt.Errorf("the server could not properly serve the resource")
+		}
+		singularResource := schema.GroupVersionResource{Group: crd.Spec.Group, Version: v.Name, Resource: crd.Status.AcceptedNames.Singular}
+		if len(singularResource.Resource) == 0 {
+			utilruntime.HandleError(fmt.Errorf("CustomResourceDefinition %s has unexpected empty status.acceptedNames.singular", crd.Name))
+			return nil, fmt.Errorf("the server could not properly serve the resource")
+		}
 		kind := schema.GroupVersionKind{Group: crd.Spec.Group, Version: v.Name, Kind: crd.Status.AcceptedNames.Kind}
+		if len(kind.Kind) == 0 {
+			utilruntime.HandleError(fmt.Errorf("CustomResourceDefinition %s has unexpected empty status.acceptedNames.kind", crd.Name))
+			return nil, fmt.Errorf("the server could not properly serve the kind")
+		}
 		equivalentResourceRegistry.RegisterKindFor(resource, "", kind)
 
 		typer := newUnstructuredObjectTyper(parameterScheme)
@@ -739,20 +749,22 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 			utilruntime.HandleError(err)
 			return nil, fmt.Errorf("the server could not properly serve the CR schema")
 		}
+		var internalSchemaProps *apiextensionsinternal.JSONSchemaProps
 		var internalValidationSchema *apiextensionsinternal.CustomResourceValidation
 		if validationSchema != nil {
 			internalValidationSchema = &apiextensionsinternal.CustomResourceValidation{}
 			if err := apiextensionsv1.Convert_v1_CustomResourceValidation_To_apiextensions_CustomResourceValidation(validationSchema, internalValidationSchema, nil); err != nil {
 				return nil, fmt.Errorf("failed to convert CRD validation to internal version: %v", err)
 			}
+			internalSchemaProps = internalValidationSchema.OpenAPIV3Schema
 		}
-		validator, _, err := apiservervalidation.NewSchemaValidator(internalValidationSchema)
+		validator, _, err := apiservervalidation.NewSchemaValidator(internalSchemaProps)
 		if err != nil {
 			return nil, err
 		}
 
 		var statusSpec *apiextensionsinternal.CustomResourceSubresourceStatus
-		var statusValidator *validate.SchemaValidator
+		var statusValidator apiservervalidation.SchemaValidator
 		subresources, err := apiextensionshelpers.GetSubresourcesForVersion(crd, v.Name)
 		if err != nil {
 			utilruntime.HandleError(err)
@@ -767,11 +779,10 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 			// for the status subresource, validate only against the status schema
 			if internalValidationSchema != nil && internalValidationSchema.OpenAPIV3Schema != nil && internalValidationSchema.OpenAPIV3Schema.Properties != nil {
 				if statusSchema, ok := internalValidationSchema.OpenAPIV3Schema.Properties["status"]; ok {
-					openapiSchema := &spec.Schema{}
-					if err := apiservervalidation.ConvertJSONSchemaPropsWithPostProcess(&statusSchema, openapiSchema, apiservervalidation.StripUnsupportedFormatsPostProcess); err != nil {
+					statusValidator, _, err = apiservervalidation.NewSchemaValidator(&statusSchema)
+					if err != nil {
 						return nil, err
 					}
-					statusValidator = validate.NewSchemaValidator(openapiSchema, nil, "", strfmt.Default)
 				}
 			}
 		}
@@ -795,17 +806,24 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 			klog.V(2).Infof("The CRD for %v has an invalid printer specification, falling back to default printing: %v", kind, err)
 		}
 
+		listKind := schema.GroupVersionKind{Group: crd.Spec.Group, Version: v.Name, Kind: crd.Status.AcceptedNames.ListKind}
+		if len(listKind.Kind) == 0 {
+			utilruntime.HandleError(fmt.Errorf("CustomResourceDefinition %s has unexpected empty status.acceptedNames.listKind", crd.Name))
+			return nil, fmt.Errorf("the server could not properly serve the list kind")
+		}
+
 		storages[v.Name] = customresource.NewStorage(
 			resource.GroupResource(),
+			singularResource.GroupResource(),
 			kind,
-			schema.GroupVersionKind{Group: crd.Spec.Group, Version: v.Name, Kind: crd.Status.AcceptedNames.ListKind},
+			listKind,
 			customresource.NewStrategy(
 				typer,
 				crd.Spec.Scope == apiextensionsv1.NamespaceScoped,
 				kind,
 				validator,
 				statusValidator,
-				structuralSchemas,
+				structuralSchemas[v.Name],
 				statusSpec,
 				scaleSpec,
 			),
@@ -833,6 +851,45 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 			structuralSchemas:     structuralSchemas,
 			structuralSchemaGK:    kind.GroupKind(),
 			preserveUnknownFields: crd.Spec.PreserveUnknownFields,
+			supportedMediaTypes: []runtime.SerializerInfo{
+				{
+					MediaType:        "application/json",
+					MediaTypeType:    "application",
+					MediaTypeSubType: "json",
+					EncodesAsText:    true,
+					Serializer:       json.NewSerializer(json.DefaultMetaFactory, creator, typer, false),
+					PrettySerializer: json.NewSerializer(json.DefaultMetaFactory, creator, typer, true),
+					StrictSerializer: json.NewSerializerWithOptions(json.DefaultMetaFactory, creator, typer, json.SerializerOptions{
+						Strict: true,
+					}),
+					StreamSerializer: &runtime.StreamSerializerInfo{
+						EncodesAsText: true,
+						Serializer:    json.NewSerializer(json.DefaultMetaFactory, creator, typer, false),
+						Framer:        json.Framer,
+					},
+				},
+				{
+					MediaType:        "application/yaml",
+					MediaTypeType:    "application",
+					MediaTypeSubType: "yaml",
+					EncodesAsText:    true,
+					Serializer:       json.NewYAMLSerializer(json.DefaultMetaFactory, creator, typer),
+					StrictSerializer: json.NewSerializerWithOptions(json.DefaultMetaFactory, creator, typer, json.SerializerOptions{
+						Yaml:   true,
+						Strict: true,
+					}),
+				},
+				{
+					MediaType:        "application/vnd.kubernetes.protobuf",
+					MediaTypeType:    "application",
+					MediaTypeSubType: "vnd.kubernetes.protobuf",
+					Serializer:       protobuf.NewSerializer(creator, typer),
+					StreamSerializer: &runtime.StreamSerializerInfo{
+						Serializer: protobuf.NewRawSerializer(creator, typer),
+						Framer:     protobuf.LengthDelimitedFramer,
+					},
+				},
+			},
 		}
 		var standardSerializers []runtime.SerializerInfo
 		for _, s := range negotiatedSerializer.SupportedMediaTypes() {
@@ -976,8 +1033,8 @@ func (r *crdHandler) getOrCreateServingInfoFor(uid types.UID, name string) (*crd
 	return ret, nil
 }
 
-func scopeWithFieldManager(typeConverter fieldmanager.TypeConverter, reqScope handlers.RequestScope, resetFields map[fieldpath.APIVersion]*fieldpath.Set, subresource string) (handlers.RequestScope, error) {
-	fieldManager, err := fieldmanager.NewDefaultCRDFieldManager(
+func scopeWithFieldManager(typeConverter managedfields.TypeConverter, reqScope handlers.RequestScope, resetFields map[fieldpath.APIVersion]*fieldpath.Set, subresource string) (handlers.RequestScope, error) {
+	fieldManager, err := managedfields.NewDefaultCRDFieldManager(
 		typeConverter,
 		reqScope.Convertor,
 		reqScope.Defaulter,
@@ -1021,48 +1078,12 @@ type unstructuredNegotiatedSerializer struct {
 	structuralSchemas     map[string]*structuralschema.Structural // by version
 	structuralSchemaGK    schema.GroupKind
 	preserveUnknownFields bool
+
+	supportedMediaTypes []runtime.SerializerInfo
 }
 
 func (s unstructuredNegotiatedSerializer) SupportedMediaTypes() []runtime.SerializerInfo {
-	return []runtime.SerializerInfo{
-		{
-			MediaType:        "application/json",
-			MediaTypeType:    "application",
-			MediaTypeSubType: "json",
-			EncodesAsText:    true,
-			Serializer:       json.NewSerializer(json.DefaultMetaFactory, s.creator, s.typer, false),
-			PrettySerializer: json.NewSerializer(json.DefaultMetaFactory, s.creator, s.typer, true),
-			StrictSerializer: json.NewSerializerWithOptions(json.DefaultMetaFactory, s.creator, s.typer, json.SerializerOptions{
-				Strict: true,
-			}),
-			StreamSerializer: &runtime.StreamSerializerInfo{
-				EncodesAsText: true,
-				Serializer:    json.NewSerializer(json.DefaultMetaFactory, s.creator, s.typer, false),
-				Framer:        json.Framer,
-			},
-		},
-		{
-			MediaType:        "application/yaml",
-			MediaTypeType:    "application",
-			MediaTypeSubType: "yaml",
-			EncodesAsText:    true,
-			Serializer:       json.NewYAMLSerializer(json.DefaultMetaFactory, s.creator, s.typer),
-			StrictSerializer: json.NewSerializerWithOptions(json.DefaultMetaFactory, s.creator, s.typer, json.SerializerOptions{
-				Yaml:   true,
-				Strict: true,
-			}),
-		},
-		{
-			MediaType:        "application/vnd.kubernetes.protobuf",
-			MediaTypeType:    "application",
-			MediaTypeSubType: "vnd.kubernetes.protobuf",
-			Serializer:       protobuf.NewSerializer(s.creator, s.typer),
-			StreamSerializer: &runtime.StreamSerializerInfo{
-				Serializer: protobuf.NewRawSerializer(s.creator, s.typer),
-				Framer:     protobuf.LengthDelimitedFramer,
-			},
-		},
-	}
+	return s.supportedMediaTypes
 }
 
 func (s unstructuredNegotiatedSerializer) EncoderForVersion(encoder runtime.Encoder, gv runtime.GroupVersioner) runtime.Encoder {
@@ -1365,29 +1386,39 @@ func hasServedCRDVersion(spec *apiextensionsv1.CustomResourceDefinitionSpec, ver
 // buildOpenAPIModelsForApply constructs openapi models from any validation schemas specified in the custom resource,
 // and merges it with the models defined in the static OpenAPI spec.
 // Returns nil models ifthe static spec is nil, or an error is encountered.
-func buildOpenAPIModelsForApply(staticOpenAPISpec *spec.Swagger, crd *apiextensionsv1.CustomResourceDefinition) (proto.Models, error) {
+func buildOpenAPIModelsForApply(staticOpenAPISpec map[string]*spec.Schema, crd *apiextensionsv1.CustomResourceDefinition) (map[string]*spec.Schema, error) {
 	if staticOpenAPISpec == nil {
 		return nil, nil
 	}
 
-	specs := []*spec.Swagger{}
+	// Convert static spec to V3 format to be able to merge
+	staticSpecV3 := &spec3.OpenAPI{
+		Version: "3.0.0",
+		Info: &spec.Info{
+			InfoProps: spec.InfoProps{
+				Title:   "Kubernetes CRD Swagger",
+				Version: "v0.1.0",
+			},
+		},
+		Components: &spec3.Components{
+			Schemas: staticOpenAPISpec,
+		},
+	}
+
+	specs := []*spec3.OpenAPI{staticSpecV3}
 	for _, v := range crd.Spec.Versions {
 		// Defaults are not pruned here, but before being served.
 		// See flag description in builder.go for flag usage
-		s, err := builder.BuildOpenAPIV2(crd, v.Name, builder.Options{V2: true, SkipFilterSchemaForKubectlOpenAPIV2Validation: true, StripValueValidation: true, StripNullable: true, AllowNonStructural: false})
+		s, err := builder.BuildOpenAPIV3(crd, v.Name, builder.Options{})
 		if err != nil {
 			return nil, err
 		}
 		specs = append(specs, s)
 	}
 
-	mergedOpenAPI, err := builder.MergeSpecs(staticOpenAPISpec, specs...)
+	mergedOpenAPI, err := builder.MergeSpecsV3(specs...)
 	if err != nil {
 		return nil, err
 	}
-	models, err := utilopenapi.ToProtoModels(mergedOpenAPI)
-	if err != nil {
-		return nil, err
-	}
-	return models, nil
+	return mergedOpenAPI.Components.Schemas, nil
 }

@@ -45,7 +45,7 @@ func TestErrorNew(t *testing.T) {
 		t.Errorf("expected to not be %s", metav1.StatusReasonConflict)
 	}
 	if IsNotFound(err) {
-		t.Errorf(fmt.Sprintf("expected to not be %s", metav1.StatusReasonNotFound))
+		t.Errorf("expected to not be %s", metav1.StatusReasonNotFound)
 	}
 	if IsInvalid(err) {
 		t.Errorf("expected to not be %s", metav1.StatusReasonInvalid)
@@ -164,7 +164,7 @@ func TestNewInvalid(t *testing.T) {
 			`Kind "name" is invalid: field[0].name: Not found: "bar"`,
 		},
 		{
-			field.NotSupported(field.NewPath("field[0].name"), "bar", nil),
+			field.NotSupported[string](field.NewPath("field[0].name"), "bar", nil),
 			&metav1.StatusDetails{
 				Kind: "Kind",
 				Name: "name",

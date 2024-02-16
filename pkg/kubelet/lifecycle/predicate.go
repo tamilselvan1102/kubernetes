@@ -21,9 +21,11 @@ import (
 	"runtime"
 
 	v1 "k8s.io/api/core/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/scheduler"
 	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
@@ -69,9 +71,42 @@ func (w *predicateAdmitHandler) Admit(attrs *PodAdmitAttributes) PodAdmitResult 
 		}
 	}
 	admitPod := attrs.Pod
+
+	// perform the checks that preemption will not help first to avoid meaningless pod eviction
+	if rejectPodAdmissionBasedOnOSSelector(admitPod, node) {
+		return PodAdmitResult{
+			Admit:   false,
+			Reason:  "PodOSSelectorNodeLabelDoesNotMatch",
+			Message: "Failed to admit pod as the `kubernetes.io/os` label doesn't match node label",
+		}
+	}
+	if rejectPodAdmissionBasedOnOSField(admitPod) {
+		return PodAdmitResult{
+			Admit:   false,
+			Reason:  "PodOSNotSupported",
+			Message: "Failed to admit pod as the OS field doesn't match node OS",
+		}
+	}
+
 	pods := attrs.OtherPods
 	nodeInfo := schedulerframework.NewNodeInfo(pods...)
 	nodeInfo.SetNode(node)
+
+	// TODO: Remove this after the SidecarContainers feature gate graduates to GA.
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SidecarContainers) {
+		for _, c := range admitPod.Spec.InitContainers {
+			if types.IsRestartableInitContainer(&c) {
+				message := fmt.Sprintf("Init container %q may not have a non-default restartPolicy", c.Name)
+				klog.InfoS("Failed to admit pod", "pod", klog.KObj(admitPod), "message", message)
+				return PodAdmitResult{
+					Admit:   false,
+					Reason:  "InitContainerRestartPolicyForbidden",
+					Message: message,
+				}
+			}
+		}
+	}
+
 	// ensure the node has enough plugin resources for that required in pods
 	if err = w.pluginResourceUpdateFunc(nodeInfo, attrs); err != nil {
 		message := fmt.Sprintf("Update plugin resources failed due to %v, which is unexpected.", err)
@@ -142,21 +177,6 @@ func (w *predicateAdmitHandler) Admit(attrs *PodAdmitAttributes) PodAdmitResult 
 			Message: message,
 		}
 	}
-	if rejectPodAdmissionBasedOnOSSelector(admitPod, node) {
-		return PodAdmitResult{
-			Admit:   false,
-			Reason:  "PodOSSelectorNodeLabelDoesNotMatch",
-			Message: "Failed to admit pod as the `kubernetes.io/os` label doesn't match node label",
-		}
-	}
-	// By this time, node labels should have been synced, this helps in identifying the pod with the usage.
-	if rejectPodAdmissionBasedOnOSField(admitPod) {
-		return PodAdmitResult{
-			Admit:   false,
-			Reason:  "PodOSNotSupported",
-			Message: "Failed to admit pod as the OS field doesn't match node OS",
-		}
-	}
 	return PodAdmitResult{
 		Admit: true,
 	}
@@ -185,8 +205,7 @@ func rejectPodAdmissionBasedOnOSSelector(pod *v1.Pod, node *v1.Node) bool {
 
 // rejectPodAdmissionBasedOnOSField rejects pods if their OS field doesn't match runtime.GOOS.
 // TODO: Relax this restriction when we start supporting LCOW in kubernetes where podOS may not match
-//
-//	node's OS.
+// node's OS.
 func rejectPodAdmissionBasedOnOSField(pod *v1.Pod) bool {
 	if pod.Spec.OS == nil {
 		return false

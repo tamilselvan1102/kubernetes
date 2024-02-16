@@ -34,14 +34,11 @@ import (
 
 	"github.com/google/cadvisor/cache/memory"
 	cadvisormetrics "github.com/google/cadvisor/container"
-	"github.com/google/cadvisor/events"
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
 	"github.com/google/cadvisor/manager"
 	"github.com/google/cadvisor/utils/sysfs"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
-	kubefeatures "k8s.io/kubernetes/pkg/features"
 	"k8s.io/utils/pointer"
 )
 
@@ -94,19 +91,14 @@ func New(imageFsInfoProvider ImageFsInfoProvider, rootPath string, cgroupRoots [
 		cadvisormetrics.OOMMetrics:          struct{}{},
 	}
 
-	// Only add the Accelerator metrics if the feature is inactive
-	if !utilfeature.DefaultFeatureGate.Enabled(kubefeatures.DisableAcceleratorUsageMetrics) {
-		includedMetrics[cadvisormetrics.AcceleratorUsageMetrics] = struct{}{}
-	}
-
 	if usingLegacyStats || localStorageCapacityIsolation {
 		includedMetrics[cadvisormetrics.DiskUsageMetrics] = struct{}{}
 	}
 
 	duration := maxHousekeepingInterval
-	housekeepingConfig := manager.HouskeepingConfig{
+	housekeepingConfig := manager.HousekeepingConfig{
 		Interval:     &duration,
-		AllowDynamic: pointer.BoolPtr(allowDynamicHousekeeping),
+		AllowDynamic: pointer.Bool(allowDynamicHousekeeping),
 	}
 
 	// Create the cAdvisor container manager.
@@ -136,29 +128,12 @@ func (cc *cadvisorClient) Start() error {
 	return cc.Manager.Start()
 }
 
-func (cc *cadvisorClient) ContainerInfo(name string, req *cadvisorapi.ContainerInfoRequest) (*cadvisorapi.ContainerInfo, error) {
-	return cc.GetContainerInfo(name, req)
-}
-
 func (cc *cadvisorClient) ContainerInfoV2(name string, options cadvisorapiv2.RequestOptions) (map[string]cadvisorapiv2.ContainerInfo, error) {
 	return cc.GetContainerInfoV2(name, options)
 }
 
 func (cc *cadvisorClient) VersionInfo() (*cadvisorapi.VersionInfo, error) {
 	return cc.GetVersionInfo()
-}
-
-func (cc *cadvisorClient) SubcontainerInfo(name string, req *cadvisorapi.ContainerInfoRequest) (map[string]*cadvisorapi.ContainerInfo, error) {
-	infos, err := cc.SubcontainersInfo(name, req)
-	if err != nil && len(infos) == 0 {
-		return nil, err
-	}
-
-	result := make(map[string]*cadvisorapi.ContainerInfo, len(infos))
-	for _, info := range infos {
-		result[info.Name] = info
-	}
-	return result, err
 }
 
 func (cc *cadvisorClient) MachineInfo() (*cadvisorapi.MachineInfo, error) {
@@ -193,6 +168,10 @@ func (cc *cadvisorClient) getFsInfo(label string) (cadvisorapiv2.FsInfo, error) 
 	return res[0], nil
 }
 
-func (cc *cadvisorClient) WatchEvents(request *events.Request) (*events.EventChannel, error) {
-	return cc.WatchForEvents(request)
+func (cc *cadvisorClient) ContainerFsInfo() (cadvisorapiv2.FsInfo, error) {
+	label, err := cc.imageFsInfoProvider.ContainerFsInfoLabel()
+	if err != nil {
+		return cadvisorapiv2.FsInfo{}, err
+	}
+	return cc.getFsInfo(label)
 }

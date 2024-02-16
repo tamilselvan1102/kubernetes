@@ -18,7 +18,7 @@ package certificates
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
@@ -29,7 +29,7 @@ import (
 	certificatesv1 "k8s.io/api/certificates/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/rest/fake"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
@@ -193,7 +193,7 @@ func TestCertificates(t *testing.T) {
 				actions = append(actions, req.Method+" "+req.URL.Path)
 				switch p, m := req.URL.Path, req.Method; {
 				case tc.nov1 && strings.HasPrefix(p, "/apis/certificates.k8s.io/v1/"):
-					return &http.Response{StatusCode: http.StatusNotFound, Body: ioutil.NopCloser(bytes.NewBuffer([]byte{}))}, nil
+					return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewBuffer([]byte{}))}, nil
 
 				case p == "/apis/certificates.k8s.io/v1/certificatesigningrequests/missing" && m == http.MethodGet:
 					return &http.Response{StatusCode: http.StatusNotFound}, nil
@@ -235,7 +235,7 @@ func TestCertificates(t *testing.T) {
 				NegotiatedSerializer: resource.UnstructuredPlusDefaultContentConfig().NegotiatedSerializer,
 				Client:               fakeClient,
 			}
-			streams, _, buf, errbuf := genericclioptions.NewTestIOStreams()
+			streams, _, buf, errbuf := genericiooptions.NewTestIOStreams()
 			tf.ClientConfigVal.Transport = fakeClient.Transport
 
 			defer func() {

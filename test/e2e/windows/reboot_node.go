@@ -21,11 +21,13 @@ import (
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/apimachinery/pkg/util/uuid"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
@@ -33,18 +35,18 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletVersion:1.22] RebootHost containers [Serial] [Disruptive] [Slow]", func() {
+var _ = sigDescribe(feature.Windows, "[Excluded:WindowsDocker] [MinimumKubeletVersion:1.22] RebootHost containers", framework.WithSerial(), framework.WithDisruptive(), framework.WithSlow(), skipUnlessWindows(func() {
 	ginkgo.BeforeEach(func() {
 		e2eskipper.SkipUnlessNodeOSDistroIs("windows")
 	})
 
 	f := framework.NewDefaultFramework("reboot-host-test-windows")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
-	ginkgo.It("should run as a reboot process on the host/node", func() {
+	ginkgo.It("should run as a reboot process on the host/node", func(ctx context.Context) {
 
 		ginkgo.By("selecting a Windows node")
-		targetNode, err := findWindowsNode(f)
+		targetNode, err := findWindowsNode(ctx, f)
 		framework.ExpectNoError(err, "Error finding Windows node")
 		framework.Logf("Using node: %v", targetNode.Name)
 
@@ -74,7 +76,7 @@ var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletV
 		}
 		agnPod.Spec.Containers[0].Args = []string{"test-webserver"}
 		ginkgo.By("creating a windows pod and waiting for it to be running")
-		agnPod = e2epod.NewPodClient(f).CreateSync(agnPod)
+		agnPod = e2epod.NewPodClient(f).CreateSync(ctx, agnPod)
 
 		// Create Linux pod to ping the windows pod
 		linuxBusyBoxImage := imageutils.GetE2EImage(imageutils.Nginx)
@@ -107,16 +109,16 @@ var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletV
 			},
 		}
 		ginkgo.By("Waiting for the Linux pod to run")
-		nginxPod = e2epod.NewPodClient(f).CreateSync(nginxPod)
+		nginxPod = e2epod.NewPodClient(f).CreateSync(ctx, nginxPod)
 
 		ginkgo.By("checking connectivity to 8.8.8.8 53 (google.com) from Linux")
-		assertConsistentConnectivity(f, nginxPod.ObjectMeta.Name, "linux", linuxCheck("8.8.8.8", 53))
+		assertConsistentConnectivity(ctx, f, nginxPod.ObjectMeta.Name, "linux", linuxCheck("8.8.8.8", 53), externalMaxTries)
 
 		ginkgo.By("checking connectivity to www.google.com from Windows")
-		assertConsistentConnectivity(f, agnPod.ObjectMeta.Name, "windows", windowsCheck("www.google.com"))
+		assertConsistentConnectivity(ctx, f, agnPod.ObjectMeta.Name, "windows", windowsCheck("www.google.com"), externalMaxTries)
 
 		ginkgo.By("checking connectivity from Linux to Windows for the first time")
-		assertConsistentConnectivity(f, nginxPod.ObjectMeta.Name, "linux", linuxCheck(agnPod.Status.PodIP, 80))
+		assertConsistentConnectivity(ctx, f, nginxPod.ObjectMeta.Name, "linux", linuxCheck(agnPod.Status.PodIP, 80), internalMaxTries)
 
 		initialRestartCount := podutil.GetExistingContainerStatus(agnPod.Status.ContainerStatuses, "windows-container").RestartCount
 
@@ -156,19 +158,19 @@ var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletV
 			},
 		}
 
-		e2epod.NewPodClient(f).Create(pod)
+		e2epod.NewPodClient(f).Create(ctx, pod)
 
 		ginkgo.By("Waiting for pod to run")
-		e2epod.NewPodClient(f).WaitForFinish(podName, 3*time.Minute)
+		e2epod.NewPodClient(f).WaitForFinish(ctx, podName, 3*time.Minute)
 
 		ginkgo.By("Then ensuring pod finished running successfully")
 		p, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(
-			context.TODO(),
+			ctx,
 			podName,
 			metav1.GetOptions{})
 
 		framework.ExpectNoError(err, "Error retrieving pod")
-		framework.ExpectEqual(p.Status.Phase, v1.PodSucceeded)
+		gomega.Expect(p.Status.Phase).To(gomega.Equal(v1.PodSucceeded))
 
 		ginkgo.By("Waiting for Windows worker rebooting")
 
@@ -185,7 +187,7 @@ var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletV
 					break FOR
 				}
 				ginkgo.By("Then checking existed agn-test-pod is running on the rebooted host")
-				agnPodOut, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(context.TODO(), agnPod.Name, metav1.GetOptions{})
+				agnPodOut, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(ctx, agnPod.Name, metav1.GetOptions{})
 				if err == nil {
 					lastRestartCount := podutil.GetExistingContainerStatus(agnPodOut.Status.ContainerStatuses, "windows-container").RestartCount
 					restartCount = int(lastRestartCount - initialRestartCount)
@@ -195,12 +197,12 @@ var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletV
 		}
 
 		ginkgo.By("Checking whether agn-test-pod is rebooted")
-		framework.ExpectEqual(restartCount, 1)
+		gomega.Expect(restartCount).To(gomega.Equal(1), "restart count of agn-test-pod is 1")
 
-		agnPodOut, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(context.TODO(), agnPod.Name, metav1.GetOptions{})
-		framework.ExpectEqual(agnPodOut.Status.Phase, v1.PodRunning)
+		agnPodOut, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(ctx, agnPod.Name, metav1.GetOptions{})
+		gomega.Expect(agnPodOut.Status.Phase).To(gomega.Equal(v1.PodRunning))
 		framework.ExpectNoError(err, "getting pod info after reboot")
-		assertConsistentConnectivity(f, nginxPod.ObjectMeta.Name, "linux", linuxCheck(agnPodOut.Status.PodIP, 80))
+		assertConsistentConnectivity(ctx, f, nginxPod.ObjectMeta.Name, "linux", linuxCheck(agnPodOut.Status.PodIP, 80), internalMaxTries)
 
 		// create another host process pod to check system boot time
 		checkPod := &v1.Pod{
@@ -239,18 +241,18 @@ var _ = SIGDescribe("[Feature:Windows] [Excluded:WindowsDocker] [MinimumKubeletV
 			},
 		}
 
-		e2epod.NewPodClient(f).Create(checkPod)
+		e2epod.NewPodClient(f).Create(ctx, checkPod)
 
 		ginkgo.By("Waiting for pod to run")
-		e2epod.NewPodClient(f).WaitForFinish("check-reboot-pod", 3*time.Minute)
+		e2epod.NewPodClient(f).WaitForFinish(ctx, "check-reboot-pod", 3*time.Minute)
 
 		ginkgo.By("Then ensuring pod finished running successfully")
 		p, err = f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(
-			context.TODO(),
+			ctx,
 			"check-reboot-pod",
 			metav1.GetOptions{})
 
 		framework.ExpectNoError(err, "Error retrieving pod")
-		framework.ExpectEqual(p.Status.Phase, v1.PodSucceeded)
+		gomega.Expect(p.Status.Phase).To(gomega.Equal(v1.PodSucceeded))
 	})
-})
+}))

@@ -214,13 +214,15 @@ func upgradeComponent(component string, certsRenewMgr *renewal.Manager, waiter a
 	recoverManifests[component] = backupManifestPath
 
 	// Skip upgrade if current and new manifests are equal
-	equal, err := staticpod.ManifestFilesAreEqual(currentManifestPath, newManifestPath)
+	equal, diff, err := staticpod.ManifestFilesAreEqual(currentManifestPath, newManifestPath)
 	if err != nil {
 		return err
 	}
 	if equal {
 		fmt.Printf("[upgrade/staticpods] Current and new manifests of %s are equal, skipping upgrade\n", component)
 		return nil
+	} else {
+		klog.V(4).Infof("Pod manifest files diff:\n%s\n", diff)
 	}
 
 	// if certificate renewal should be performed
@@ -280,8 +282,9 @@ func performEtcdStaticPodUpgrade(certsRenewMgr *renewal.Manager, client clientse
 	// Backing up etcd data store
 	backupEtcdDir := pathMgr.BackupEtcdDir()
 	runningEtcdDir := cfg.Etcd.Local.DataDir
-	if err := kubeadmutil.CopyDir(runningEtcdDir, backupEtcdDir); err != nil {
-		return true, errors.Wrap(err, "failed to back up etcd data")
+	output, err := kubeadmutil.CopyDir(runningEtcdDir, backupEtcdDir)
+	if err != nil {
+		return true, errors.Wrapf(err, "failed to back up etcd data, output: %q", output)
 	}
 
 	// Get the desired etcd version. That's either the one specified by the user in cfg.Etcd.Local.ImageTag
@@ -301,7 +304,7 @@ func performEtcdStaticPodUpgrade(certsRenewMgr *renewal.Manager, client clientse
 			return true, errors.Wrap(err, "failed to retrieve an etcd version for the target Kubernetes version")
 		}
 		if warning != nil {
-			klog.Warningf("[upgrade/etcd] %v", warning)
+			klog.V(1).Infof("[upgrade/etcd] WARNING: %v", warning)
 		}
 	}
 
@@ -494,6 +497,20 @@ func StaticPodControlPlane(client clientset.Interface, waiter apiclient.Waiter, 
 			// if not error, but not renewed because of external CA detected, inform the user
 			fmt.Printf("[upgrade/staticpods] External CA detected, %s certificate can't be renewed\n", constants.AdminKubeConfigFileName)
 		}
+
+		// Do the same for super-admin.conf, but only if it exists
+		if _, err := os.Stat(filepath.Join(pathMgr.KubernetesDir(), constants.SuperAdminKubeConfigFileName)); err == nil {
+			// renew the certificate embedded in the super-admin.conf file
+			renewed, err := certsRenewMgr.RenewUsingLocalCA(constants.SuperAdminKubeConfigFileName)
+			if err != nil {
+				return rollbackOldManifests(recoverManifests, errors.Wrapf(err, "failed to upgrade the %s certificates", constants.SuperAdminKubeConfigFileName), pathMgr, false)
+			}
+
+			if !renewed {
+				// if not error, but not renewed because of external CA detected, inform the user
+				fmt.Printf("[upgrade/staticpods] External CA detected, %s certificate can't be renewed\n", constants.SuperAdminKubeConfigFileName)
+			}
+		}
 	}
 
 	// Remove the temporary directories used on a best-effort (don't fail if the calls error out)
@@ -531,9 +548,10 @@ func rollbackEtcdData(cfg *kubeadmapi.InitConfiguration, pathMgr StaticPodPathMa
 	backupEtcdDir := pathMgr.BackupEtcdDir()
 	runningEtcdDir := cfg.Etcd.Local.DataDir
 
-	if err := kubeadmutil.CopyDir(backupEtcdDir, runningEtcdDir); err != nil {
+	output, err := kubeadmutil.CopyDir(backupEtcdDir, runningEtcdDir)
+	if err != nil {
 		// Let the user know there we're problems, but we tried to reçover
-		return errors.Wrapf(err, "couldn't recover etcd database with error, the location of etcd backup: %s ", backupEtcdDir)
+		return errors.Wrapf(err, "couldn't recover etcd database with error, the location of etcd backup: %s, output: %q", backupEtcdDir, output)
 	}
 
 	return nil

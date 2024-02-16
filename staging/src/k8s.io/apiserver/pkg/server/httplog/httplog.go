@@ -205,7 +205,6 @@ func StatusIsNot(statuses ...int) StacktracePred {
 func (rl *respLogger) Addf(format string, data ...interface{}) {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
-	rl.addedInfo.WriteString("\n")
 	rl.addedInfo.WriteString(fmt.Sprintf(format, data...))
 }
 
@@ -243,16 +242,7 @@ func SetStacktracePredicate(ctx context.Context, pred StacktracePred) {
 func (rl *respLogger) Log() {
 	latency := time.Since(rl.startTime)
 	auditID := audit.GetAuditIDTruncated(rl.req.Context())
-
-	verb := rl.req.Method
-	if requestInfo, ok := request.RequestInfoFrom(rl.req.Context()); ok {
-		// If we can find a requestInfo, we can get a scope, and then
-		// we can convert GETs to LISTs when needed.
-		scope := metrics.CleanScope(requestInfo)
-		verb = metrics.CanonicalVerb(strings.ToUpper(verb), scope)
-	}
-	// mark APPLY requests and WATCH requests correctly.
-	verb = metrics.CleanVerb(verb, rl.req)
+	verb := metrics.NormalizedVerb(rl.req)
 
 	keysAndValues := []interface{}{
 		"verb", verb,

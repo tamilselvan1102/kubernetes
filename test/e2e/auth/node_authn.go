@@ -25,6 +25,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/cluster/ports"
+	"k8s.io/kubernetes/test/e2e/feature"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
@@ -35,16 +36,16 @@ import (
 	"github.com/onsi/gomega"
 )
 
-var _ = SIGDescribe("[Feature:NodeAuthenticator]", func() {
+var _ = SIGDescribe(feature.NodeAuthenticator, func() {
 
 	f := framework.NewDefaultFramework("node-authn")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 	var ns string
 	var nodeIPs []string
-	ginkgo.BeforeEach(func() {
+	ginkgo.BeforeEach(func(ctx context.Context) {
 		ns = f.Namespace.Name
 
-		nodes, err := e2enode.GetBoundedReadySchedulableNodes(f.ClientSet, 1)
+		nodes, err := e2enode.GetBoundedReadySchedulableNodes(ctx, f.ClientSet, 1)
 		framework.ExpectNoError(err)
 
 		family := v1.IPv4Protocol
@@ -53,11 +54,11 @@ var _ = SIGDescribe("[Feature:NodeAuthenticator]", func() {
 		}
 
 		nodeIPs := e2enode.GetAddressesByTypeAndFamily(&nodes.Items[0], v1.NodeInternalIP, family)
-		framework.ExpectNotEqual(len(nodeIPs), 0)
+		gomega.Expect(nodeIPs).NotTo(gomega.BeEmpty())
 	})
 
-	ginkgo.It("The kubelet's main port 10250 should reject requests with no credentials", func() {
-		pod := createNodeAuthTestPod(f)
+	ginkgo.It("The kubelet's main port 10250 should reject requests with no credentials", func(ctx context.Context) {
+		pod := createNodeAuthTestPod(ctx, f)
 		for _, nodeIP := range nodeIPs {
 			// Anonymous authentication is disabled by default
 			host := net.JoinHostPort(nodeIP, strconv.Itoa(ports.KubeletPort))
@@ -66,7 +67,7 @@ var _ = SIGDescribe("[Feature:NodeAuthenticator]", func() {
 		}
 	})
 
-	ginkgo.It("The kubelet can delegate ServiceAccount tokens to the API server", func() {
+	ginkgo.It("The kubelet can delegate ServiceAccount tokens to the API server", func(ctx context.Context) {
 		ginkgo.By("create a new ServiceAccount for authentication")
 		trueValue := true
 		newSA := &v1.ServiceAccount{
@@ -76,10 +77,10 @@ var _ = SIGDescribe("[Feature:NodeAuthenticator]", func() {
 			},
 			AutomountServiceAccountToken: &trueValue,
 		}
-		_, err := f.ClientSet.CoreV1().ServiceAccounts(ns).Create(context.TODO(), newSA, metav1.CreateOptions{})
+		_, err := f.ClientSet.CoreV1().ServiceAccounts(ns).Create(ctx, newSA, metav1.CreateOptions{})
 		framework.ExpectNoError(err, "failed to create service account (%s:%s)", ns, newSA.Name)
 
-		pod := createNodeAuthTestPod(f)
+		pod := createNodeAuthTestPod(ctx, f)
 
 		for _, nodeIP := range nodeIPs {
 			host := net.JoinHostPort(nodeIP, strconv.Itoa(ports.KubeletPort))
@@ -94,8 +95,8 @@ var _ = SIGDescribe("[Feature:NodeAuthenticator]", func() {
 	})
 })
 
-func createNodeAuthTestPod(f *framework.Framework) *v1.Pod {
+func createNodeAuthTestPod(ctx context.Context, f *framework.Framework) *v1.Pod {
 	pod := e2epod.NewAgnhostPod(f.Namespace.Name, "agnhost-pod", nil, nil, nil)
 	pod.ObjectMeta.GenerateName = "test-node-authn-"
-	return e2epod.NewPodClient(f).CreateSync(pod)
+	return e2epod.NewPodClient(f).CreateSync(ctx, pod)
 }

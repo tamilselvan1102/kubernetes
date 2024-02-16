@@ -29,6 +29,7 @@ var (
 	inTreePlugins = map[string]plugins.InTreePlugin{
 		plugins.GCEPDDriverName:     plugins.NewGCEPersistentDiskCSITranslator(),
 		plugins.AWSEBSDriverName:    plugins.NewAWSElasticBlockStoreCSITranslator(),
+		plugins.CinderDriverName:    plugins.NewOpenStackCinderCSITranslator(),
 		plugins.AzureDiskDriverName: plugins.NewAzureDiskCSITranslator(),
 		plugins.AzureFileDriverName: plugins.NewAzureFileCSITranslator(),
 		plugins.VSphereDriverName:   plugins.NewvSphereCSITranslator(),
@@ -149,14 +150,14 @@ func (CSITranslator) GetInTreePluginNameFromSpec(pv *v1.PersistentVolume, vol *v
 				return curPlugin.GetInTreePluginName(), nil
 			}
 		}
-		return "", fmt.Errorf("could not find in-tree plugin name from persistent volume %v", pv)
+		return "", fmt.Errorf("could not find in-tree plugin name from persistent volume %s", pv.Name)
 	} else if vol != nil {
 		for _, curPlugin := range inTreePlugins {
 			if curPlugin.CanSupportInline(vol) {
 				return curPlugin.GetInTreePluginName(), nil
 			}
 		}
-		return "", fmt.Errorf("could not find in-tree plugin name from volume %v", vol)
+		return "", fmt.Errorf("could not find in-tree plugin name from volume %s", vol.Name)
 	} else {
 		return "", errors.New("both persistent volume and volume are nil")
 	}
@@ -170,7 +171,7 @@ func (CSITranslator) GetCSINameFromInTreeName(pluginName string) (string, error)
 			return csiDriverName, nil
 		}
 	}
-	return "", fmt.Errorf("could not find CSI Driver name for plugin %v", pluginName)
+	return "", fmt.Errorf("could not find CSI Driver name for plugin %s", pluginName)
 }
 
 // GetInTreeNameFromCSIName returns the name of the in-tree plugin superseded by
@@ -179,7 +180,7 @@ func (CSITranslator) GetInTreeNameFromCSIName(pluginName string) (string, error)
 	if plugin, ok := inTreePlugins[pluginName]; ok {
 		return plugin.GetInTreePluginName(), nil
 	}
-	return "", fmt.Errorf("could not find In-Tree driver name for CSI plugin %v", pluginName)
+	return "", fmt.Errorf("could not find In-Tree driver name for CSI plugin %s", pluginName)
 }
 
 // IsPVMigratable tests whether there is migration logic for the given Persistent Volume
@@ -207,5 +208,5 @@ func (CSITranslator) RepairVolumeHandle(driverName, volumeHandle, nodeID string)
 	if plugin, ok := inTreePlugins[driverName]; ok {
 		return plugin.RepairVolumeHandle(volumeHandle, nodeID)
 	}
-	return "", fmt.Errorf("could not find In-Tree driver name for CSI plugin %v", driverName)
+	return "", fmt.Errorf("could not find In-Tree driver name for CSI plugin %s", driverName)
 }

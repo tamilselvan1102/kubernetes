@@ -50,6 +50,19 @@ func TestGetAdminKubeConfigPath(t *testing.T) {
 	}
 }
 
+func TestGetSuperAdminKubeConfigPath(t *testing.T) {
+	expected := filepath.Join(KubernetesDir, SuperAdminKubeConfigFileName)
+	actual := GetSuperAdminKubeConfigPath()
+
+	if actual != expected {
+		t.Errorf(
+			"failed GetSuperAdminKubeConfigPath:\n\texpected: %s\n\t  actual: %s",
+			expected,
+			actual,
+		)
+	}
+}
+
 func TestGetBootstrapKubeletKubeConfigPath(t *testing.T) {
 	expected := filepath.FromSlash("/etc/kubernetes/bootstrap-kubelet.conf")
 	actual := GetBootstrapKubeletKubeConfigPath()
@@ -344,6 +357,67 @@ func TestGetAPIServerVirtualIP(t *testing.T) {
 						"failed APIServerVirtualIP:\n\texpected: %s\n\t  actual: %s",
 						rt.expectedIP,
 						virtualIP.String(),
+					)
+				}
+			}
+		})
+	}
+}
+
+func TestGetDNSIP(t *testing.T) {
+	tests := []struct {
+		name          string
+		svcSubnetList string
+		expected      string
+		expectedError bool
+	}{
+		{
+			name:          "valid IPv4 range from single-stack",
+			svcSubnetList: "192.168.10.0/24",
+			expected:      "192.168.10.10",
+			expectedError: false,
+		},
+		{
+			name:          "valid IPv6 range from single-stack",
+			svcSubnetList: "fd03::/112",
+			expected:      "fd03::a",
+			expectedError: false,
+		},
+		{
+			name:          "valid <IPv4,IPv6> ranges from dual-stack",
+			svcSubnetList: "192.168.10.0/24,fd03::/112",
+			expected:      "192.168.10.10",
+			expectedError: false,
+		},
+		{
+			name:          "valid <IPv6,IPv4> ranges from dual-stack",
+			svcSubnetList: "fd03::/112,192.168.10.0/24",
+			expected:      "fd03::a",
+			expectedError: false,
+		},
+		{
+			name:          "invalid subnet range from dual-stack",
+			svcSubnetList: "192.168.10.0/24,fd03:x::/112",
+			expected:      "",
+			expectedError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual, actualError := GetDNSIP(tt.svcSubnetList)
+			if tt.expectedError {
+				if actualError == nil {
+					t.Errorf("failed GetDNSIP:\n\texpected error, but got no error")
+				}
+			} else if !tt.expectedError && actualError != nil {
+				t.Errorf("failed GetDNSIP:\n\texpected no error, but got: %v", actualError)
+			} else {
+				if actual.String() != tt.expected {
+					t.Errorf(
+						"failed GetDNSIP:\n\texpected: %s\n\t  actual: %s",
+						tt.expected,
+						actual.String(),
 					)
 				}
 			}

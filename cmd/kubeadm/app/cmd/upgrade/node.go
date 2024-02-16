@@ -61,7 +61,7 @@ type nodeData struct {
 	isControlPlaneNode    bool
 	client                clientset.Interface
 	patchesDir            string
-	ignorePreflightErrors sets.String
+	ignorePreflightErrors sets.Set[string]
 	kubeConfigPath        string
 	outputWriter          io.Writer
 }
@@ -106,7 +106,7 @@ func newCmdNode(out io.Writer) *cobra.Command {
 // newNodeOptions returns a struct ready for being used for creating cmd kubeadm upgrade node flags.
 func newNodeOptions() *nodeOptions {
 	return &nodeOptions{
-		kubeConfigPath: constants.GetKubeletKubeConfigPath(),
+		kubeConfigPath: "", // This is populated in newNodeData() on runtime
 		dryRun:         false,
 		renewCerts:     true,
 		etcdUpgrade:    true,
@@ -125,19 +125,24 @@ func addUpgradeNodeFlags(flagSet *flag.FlagSet, nodeOptions *nodeOptions) {
 // This func takes care of validating nodeOptions passed to the command, and then it converts
 // options into the internal InitConfiguration type that is used as input all the phases in the kubeadm upgrade node workflow
 func newNodeData(cmd *cobra.Command, args []string, options *nodeOptions, out io.Writer) (*nodeData, error) {
-	client, err := getClient(options.kubeConfigPath, options.dryRun)
-	if err != nil {
-		return nil, errors.Wrapf(err, "couldn't create a Kubernetes client from file %q", options.kubeConfigPath)
-	}
-
-	// isControlPlane checks if a node is a control-plane node by looking up
-	// the kube-apiserver manifest file
+	// Checks if a node is a control-plane node by looking up the kube-apiserver manifest file
 	isControlPlaneNode := true
 	filepath := constants.GetStaticPodFilepath(constants.KubeAPIServer, constants.GetStaticPodDirectory())
 	if _, err := os.Stat(filepath); os.IsNotExist(err) {
 		isControlPlaneNode = false
 	}
+	if len(options.kubeConfigPath) == 0 {
+		// Update the kubeconfig path depending on whether this is a control plane node or not.
+		options.kubeConfigPath = constants.GetKubeletKubeConfigPath()
+		if isControlPlaneNode {
+			options.kubeConfigPath = constants.GetAdminKubeConfigPath()
+		}
+	}
 
+	client, err := getClient(options.kubeConfigPath, options.dryRun)
+	if err != nil {
+		return nil, errors.Wrapf(err, "couldn't create a Kubernetes client from file %q", options.kubeConfigPath)
+	}
 	// Fetches the cluster configuration
 	// NB in case of control-plane node, we are reading all the info for the node; in case of NOT control-plane node
 	//    (worker node), we are not reading local API address and the CRI socket from the node object
@@ -151,8 +156,7 @@ func newNodeData(cmd *cobra.Command, args []string, options *nodeOptions, out io
 		return nil, err
 	}
 	// Also set the union of pre-flight errors to JoinConfiguration, to provide a consistent view of the runtime configuration:
-	cfg.NodeRegistration.IgnorePreflightErrors = ignorePreflightErrorsSet.List()
-
+	cfg.NodeRegistration.IgnorePreflightErrors = sets.List(ignorePreflightErrorsSet)
 	return &nodeData{
 		etcdUpgrade:           options.etcdUpgrade,
 		renewCerts:            options.renewCerts,
@@ -203,11 +207,11 @@ func (d *nodeData) PatchesDir() string {
 }
 
 // IgnorePreflightErrors returns the list of preflight errors to ignore.
-func (d *nodeData) IgnorePreflightErrors() sets.String {
+func (d *nodeData) IgnorePreflightErrors() sets.Set[string] {
 	return d.ignorePreflightErrors
 }
 
-// KubeconfigPath returns the path to the user kubeconfig file.
+// KubeConfigPath returns the path to the user kubeconfig file.
 func (d *nodeData) KubeConfigPath() string {
 	return d.kubeConfigPath
 }

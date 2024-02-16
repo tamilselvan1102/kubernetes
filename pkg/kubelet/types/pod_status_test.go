@@ -26,13 +26,15 @@ import (
 )
 
 func TestPodConditionByKubelet(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodHasNetworkCondition, true)()
+	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodReadyToStartContainersCondition, true)()
+	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodDisruptionConditions, true)()
+
 	trueCases := []v1.PodConditionType{
 		v1.PodScheduled,
 		v1.PodReady,
 		v1.PodInitialized,
 		v1.ContainersReady,
-		PodHasNetwork,
+		v1.PodReadyToStartContainers,
 	}
 
 	for _, tc := range trueCases {
@@ -49,6 +51,31 @@ func TestPodConditionByKubelet(t *testing.T) {
 	for _, tc := range falseCases {
 		if PodConditionByKubelet(tc) {
 			t.Errorf("Expect %q NOT to be condition owned by kubelet.", tc)
+		}
+	}
+}
+
+func TestPodConditionSharedByKubelet(t *testing.T) {
+	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodDisruptionConditions, true)()
+
+	trueCases := []v1.PodConditionType{
+		v1.DisruptionTarget,
+	}
+
+	for _, tc := range trueCases {
+		if !PodConditionSharedByKubelet(tc) {
+			t.Errorf("Expect %q to be condition shared by kubelet.", tc)
+		}
+	}
+
+	falseCases := []v1.PodConditionType{
+		v1.PodConditionType("abcd"),
+		v1.PodConditionType(v1.PodReasonUnschedulable),
+	}
+
+	for _, tc := range falseCases {
+		if PodConditionSharedByKubelet(tc) {
+			t.Errorf("Expect %q NOT to be condition shared by kubelet.", tc)
 		}
 	}
 }

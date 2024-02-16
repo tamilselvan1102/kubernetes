@@ -17,9 +17,13 @@ limitations under the License.
 package e2enode
 
 import (
+	"archive/tar"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -31,6 +35,7 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	"k8s.io/kubernetes/test/e2e/nodefeature"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 	admissionapi "k8s.io/pod-security-admission/api"
@@ -41,8 +46,12 @@ const (
 	proxyTimeout = 2 * time.Minute
 )
 
+type checkpointResult struct {
+	Items []string `json:"items"`
+}
+
 // proxyPostRequest performs a post on a node proxy endpoint given the nodename and rest client.
-func proxyPostRequest(c clientset.Interface, node, endpoint string, port int) (restclient.Result, error) {
+func proxyPostRequest(ctx context.Context, c clientset.Interface, node, endpoint string, port int) (restclient.Result, error) {
 	// proxy tends to hang in some cases when Node is not ready. Add an artificial timeout for this call. #22165
 	var result restclient.Result
 	finished := make(chan struct{}, 1)
@@ -52,25 +61,27 @@ func proxyPostRequest(c clientset.Interface, node, endpoint string, port int) (r
 			SubResource("proxy").
 			Name(fmt.Sprintf("%v:%v", node, port)).
 			Suffix(endpoint).
-			Do(context.TODO())
+			Do(ctx)
 
 		finished <- struct{}{}
 	}()
 	select {
 	case <-finished:
 		return result, nil
+	case <-ctx.Done():
+		return restclient.Result{}, nil
 	case <-time.After(proxyTimeout):
 		return restclient.Result{}, nil
 	}
 }
 
-var _ = SIGDescribe("Checkpoint Container [NodeFeature:CheckpointContainer]", func() {
+var _ = SIGDescribe("Checkpoint Container", nodefeature.CheckpointContainer, func() {
 	f := framework.NewDefaultFramework("checkpoint-container-test")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
-	ginkgo.It("will checkpoint a container out of a pod", func() {
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
+	ginkgo.It("will checkpoint a container out of a pod", func(ctx context.Context) {
 		ginkgo.By("creating a target pod")
 		podClient := e2epod.NewPodClient(f)
-		pod := podClient.CreateSync(&v1.Pod{
+		pod := podClient.CreateSync(ctx, &v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-container-pod"},
 			Spec: v1.PodSpec{
 				Containers: []v1.Container{
@@ -85,7 +96,7 @@ var _ = SIGDescribe("Checkpoint Container [NodeFeature:CheckpointContainer]", fu
 		})
 
 		p, err := podClient.Get(
-			context.TODO(),
+			ctx,
 			pod.Name,
 			metav1.GetOptions{},
 		)
@@ -93,11 +104,9 @@ var _ = SIGDescribe("Checkpoint Container [NodeFeature:CheckpointContainer]", fu
 		framework.ExpectNoError(err)
 		isReady, err := testutils.PodRunningReady(p)
 		framework.ExpectNoError(err)
-		framework.ExpectEqual(
-			isReady,
-			true,
-			"pod should be ready",
-		)
+		if !isReady {
+			framework.Failf("pod %q should be ready", p.Name)
+		}
 
 		framework.Logf(
 			"About to checkpoint container %q on %q",
@@ -105,6 +114,7 @@ var _ = SIGDescribe("Checkpoint Container [NodeFeature:CheckpointContainer]", fu
 			pod.Spec.NodeName,
 		)
 		result, err := proxyPostRequest(
+			ctx,
 			f.ClientSet,
 			pod.Spec.NodeName,
 			fmt.Sprintf(
@@ -147,10 +157,53 @@ var _ = SIGDescribe("Checkpoint Container [NodeFeature:CheckpointContainer]", fu
 		}
 
 		framework.ExpectNoError(err)
-		// TODO: once a container engine implements the Checkpoint CRI API this needs
-		// to be extended to handle it.
-		//
+
 		// Checkpointing actually worked. Verify that the checkpoint exists and that
 		// it is a checkpoint.
+
+		raw, err := result.Raw()
+		framework.ExpectNoError(err)
+		answer := checkpointResult{}
+		err = json.Unmarshal(raw, &answer)
+		framework.ExpectNoError(err)
+
+		for _, item := range answer.Items {
+			// Check that the file exists
+			_, err := os.Stat(item)
+			framework.ExpectNoError(err)
+			// Check the content of the tar file
+			// At least looking for the following files
+			//  * spec.dump
+			//  * config.dump
+			//  * checkpoint/inventory.img
+			// If these files exist in the checkpoint archive it is
+			// probably a complete checkpoint.
+			checkForFiles := map[string]bool{
+				"spec.dump":                false,
+				"config.dump":              false,
+				"checkpoint/inventory.img": false,
+			}
+			fileReader, err := os.Open(item)
+			framework.ExpectNoError(err)
+			tr := tar.NewReader(fileReader)
+			for {
+				hdr, err := tr.Next()
+				if err == io.EOF {
+					// End of archive
+					break
+				}
+				framework.ExpectNoError(err)
+				if _, key := checkForFiles[hdr.Name]; key {
+					checkForFiles[hdr.Name] = true
+				}
+			}
+			for fileName := range checkForFiles {
+				if !checkForFiles[fileName] {
+					framework.Failf("File %q not found in checkpoint archive %q", fileName, item)
+				}
+			}
+			// cleanup checkpoint archive
+			os.RemoveAll(item)
+		}
 	})
 })
